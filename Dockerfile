@@ -3,7 +3,7 @@ FROM node:20-alpine AS build
 WORKDIR /app
 
 # Install pnpm
-RUN corepack enable && corepack prepare pnpm@latest --activate
+RUN corepack enable && corepack prepare pnpm@10 --activate
 
 # Install frontend dependencies and build
 COPY package.json pnpm-lock.yaml ./
@@ -19,7 +19,7 @@ WORKDIR /app
 RUN apk add --no-cache chromaprint ffmpeg
 
 # Install pnpm
-RUN corepack enable && corepack prepare pnpm@latest --activate
+RUN corepack enable && corepack prepare pnpm@10 --activate
 
 # Install server dependencies only
 COPY server/package.json server/pnpm-lock.yaml ./server/
