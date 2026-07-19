@@ -21,6 +21,7 @@ export const CHANGELOG: ChangelogEntry[] = [
       'Admin link in the console header for signed-in broadcasters',
       'Issuing a password reset link no longer signs the user out; old sessions are revoked only when the new password is actually set',
       'Reset-link dialog wording now matches what actually happens',
+      'Invite and reset link dialogs no longer overflow the card on long URLs',
     ],
   },
   {

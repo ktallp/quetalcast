@@ -459,8 +459,8 @@ export function UsersPanel() {
               )}
             </DialogDescription>
           </DialogHeader>
-          <div className="flex items-center gap-2">
-            <code className="flex-1 bg-input border border-border rounded-md px-3 py-2 text-xs font-mono text-foreground overflow-x-auto whitespace-nowrap">
+          <div className="flex items-center gap-2 min-w-0">
+            <code className="flex-1 min-w-0 bg-input border border-border rounded-md px-3 py-2 text-xs font-mono text-foreground overflow-x-auto whitespace-nowrap">
               {invite?.url}
             </code>
             <Button
