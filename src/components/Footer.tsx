@@ -38,7 +38,7 @@ export function Footer() {
         <span className="font-mono text-muted-foreground/40">v{APP_VERSION}</span>
       </div>
       <a
-        href="https://github.com/specialopsio/quetalcast"
+        href="https://github.com/ktallp/quetalcast"
         target="_blank"
         rel="noopener noreferrer"
         className="text-muted-foreground/40 hover:text-foreground hover:underline underline-offset-2 transition-colors"

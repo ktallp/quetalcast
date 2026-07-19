@@ -82,7 +82,7 @@ System Audio ─► Gain ─► Pan ──────────────�
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/specialopsio/quetalcast.git
+git clone https://github.com/ktallp/quetalcast.git
 cd quetalcast
 
 # Install frontend dependencies

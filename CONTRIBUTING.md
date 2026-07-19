@@ -70,4 +70,4 @@ This project adheres to the [Contributor Covenant Code of Conduct](CODE_OF_CONDU
 
 ## Questions?
 
-If you have questions or want to discuss an idea before contributing, feel free to open an [issue](https://github.com/specialopsio/quetalcast/issues) on GitHub.
+If you have questions or want to discuss an idea before contributing, feel free to open an [issue](https://github.com/ktallp/quetalcast/issues) on GitHub.
