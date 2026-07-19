@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { isAuthenticated, isOwner, verifySession } from '@/lib/auth';
-import { Shield } from 'lucide-react';
+import { isAuthenticated, isOwner, logout, verifySession } from '@/lib/auth';
+import { Shield, Radio, LogOut } from 'lucide-react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { RoomsPanel, type AdminRoom, type RoomStats } from '@/components/admin/RoomsPanel';
 import { UsersPanel } from '@/components/admin/UsersPanel';
@@ -58,8 +58,29 @@ const Admin = () => {
           <Shield className="h-4 w-4 text-primary" />
           ADMIN
         </div>
-        <div className={`status-badge ${serverStatus === 'online' ? 'status-on-air' : 'status-offline'}`}>
-          Server: {serverStatus}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => navigate('/broadcast')}
+            className="flex items-center gap-1.5 text-xs font-mono text-muted-foreground hover:text-foreground transition-colors bg-secondary px-3 py-1.5 rounded-md"
+            aria-label="Back to the broadcaster console"
+          >
+            <Radio className="h-3 w-3" aria-hidden />
+            Console
+          </button>
+          <button
+            onClick={async () => {
+              await logout();
+              navigate('/login');
+            }}
+            className="flex items-center gap-1.5 text-xs font-mono text-muted-foreground hover:text-foreground transition-colors bg-secondary px-3 py-1.5 rounded-md"
+            aria-label="Log out"
+          >
+            <LogOut className="h-3 w-3" aria-hidden />
+            Log out
+          </button>
+          <div className={`status-badge ${serverStatus === 'online' ? 'status-on-air' : 'status-offline'}`}>
+            Server: {serverStatus}
+          </div>
         </div>
       </div>
 

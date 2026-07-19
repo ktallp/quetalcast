@@ -22,6 +22,7 @@ export const CHANGELOG: ChangelogEntry[] = [
       'Issuing a password reset link no longer signs the user out; old sessions are revoked only when the new password is actually set',
       'Reset-link dialog wording now matches what actually happens',
       'Invite and reset link dialogs no longer overflow the card on long URLs',
+      'Log out buttons in the console and admin headers (with a confirmation while on air or recording), plus a Console link on the admin page',
     ],
   },
   {

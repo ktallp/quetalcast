@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { isAuthenticated, verifySession } from '@/lib/auth';
+import { isAuthenticated, logout, verifySession } from '@/lib/auth';
 import { useSignaling } from '@/hooks/useSignaling';
 import { useWebRTC, type ConnectionStatus, type AudioQuality } from '@/hooks/useWebRTC';
 import { useAudioAnalyser } from '@/hooks/useAudioAnalyser';
@@ -10,7 +10,7 @@ import { HealthPanel } from '@/components/HealthPanel';
 import { EventLog, createLogEntry, type LogEntry } from '@/components/EventLog';
 import {
   Mic, Radio, Music, Sparkles, Zap, Plug2, Keyboard, Monitor, MonitorOff,
-  Download, SlidersHorizontal, Copy, ListMusic, ScrollText, Ear, Shield,
+  Download, SlidersHorizontal, Copy, ListMusic, ScrollText, Ear, Shield, LogOut,
 } from 'lucide-react';
 import { toast } from '@/components/ui/sonner';
 import {
@@ -136,6 +136,7 @@ const Broadcaster = () => {
   const [deletePresetName, setDeletePresetName] = useState<string | null>(null);
   const [qualityMode, setQualityMode] = useState<AudioQuality>('auto');
   const [endConfirmOpen, setEndConfirmOpen] = useState(false);
+  const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
 
   // Pre-broadcast modal state
   const [preBroadcastOpen, setPreBroadcastOpen] = useState(false);
@@ -1237,6 +1238,21 @@ const Broadcaster = () => {
               <Shield className="h-3 w-3" aria-hidden />
               Admin
             </Link>
+            <button
+              onClick={async () => {
+                if (isOnAir || recorder.recording) {
+                  setLogoutConfirmOpen(true);
+                  return;
+                }
+                await logout();
+                navigate('/login');
+              }}
+              className="flex items-center gap-1.5 text-xs font-mono text-muted-foreground hover:text-foreground transition-colors bg-secondary px-3 py-1.5 rounded-md"
+              aria-label="Log out"
+            >
+              <LogOut className="h-3 w-3" aria-hidden />
+              Log out
+            </button>
           </div>
         </div>
 
@@ -1530,6 +1546,28 @@ const Broadcaster = () => {
         confirmLabel="End broadcast"
         destructive
         onConfirm={handleEndBroadcast}
+      />
+
+      {/* Logout confirmation while live or recording */}
+      <ConfirmDialog
+        open={logoutConfirmOpen}
+        onOpenChange={setLogoutConfirmOpen}
+        title="Log out?"
+        description={
+          <>
+            {isOnAir && 'Logging out ends your broadcast.'}
+            {recorder.recording && ' Your recording will stop and the MP3 will download first.'}
+            {!isOnAir && !recorder.recording && 'You will be signed out on this device.'}
+          </>
+        }
+        confirmLabel="Log out"
+        destructive
+        onConfirm={async () => {
+          if (isOnAir) handleEndBroadcast();
+          if (recorder.recording) recorder.stopRecording();
+          await logout();
+          navigate('/login');
+        }}
       />
 
       {/* Preset delete confirmation */}
