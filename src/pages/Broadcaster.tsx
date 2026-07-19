@@ -10,7 +10,7 @@ import { HealthPanel } from '@/components/HealthPanel';
 import { EventLog, createLogEntry, type LogEntry } from '@/components/EventLog';
 import {
   Mic, Radio, Music, Sparkles, Zap, Plug2, Keyboard, Monitor, MonitorOff,
-  Download, SlidersHorizontal, Copy, ListMusic, ScrollText,
+  Download, SlidersHorizontal, Copy, ListMusic, ScrollText, Ear,
 } from 'lucide-react';
 import { toast } from '@/components/ui/sonner';
 import {
@@ -29,7 +29,8 @@ import { EffectsBoard } from '@/components/EffectsBoard';
 import { Footer } from '@/components/Footer';
 import { ChatPanel } from '@/components/ChatPanel';
 import { IntegrationsSheet } from '@/components/IntegrationsSheet';
-import { useIntegrationStream } from '@/hooks/useIntegrationStream';
+import { useIntegrationStream, type RelayStatus } from '@/hooks/useIntegrationStream';
+import { useAutoIdentify } from '@/hooks/useAutoIdentify';
 import { useRelayStream } from '@/hooks/useRelayStream';
 import { getIntegration, type IntegrationConfig } from '@/lib/integrations';
 import { getPresets, savePreset, deletePreset, type Preset } from '@/lib/presets';
@@ -90,6 +91,7 @@ type PersistedBroadcasterLayout = {
   padsMonitor: boolean;
   duckPads: boolean;
   duckSystem: boolean;
+  autoIdentify: boolean;
   selectedDevice: string;
   sideTab: SideTab;
   effects: Record<EffectName, { enabled: boolean; params: Record<string, number> }>;
@@ -165,6 +167,8 @@ const Broadcaster = () => {
   const [padsMonitor, setPadsMonitor] = useState(true);
   const [duckPads, setDuckPads] = useState(false);
   const [duckSystem, setDuckSystem] = useState(false);
+  const [autoIdentifyAvailable, setAutoIdentifyAvailable] = useState(false);
+  const [autoIdentifyOn, setAutoIdentifyOn] = useState(false);
   const [systemAudioInfoOpen, setSystemAudioInfoOpen] = useState(false);
   const systemAudioStreamRef = useRef<MediaStream | null>(null);
   const [channelLevels, setChannelLevels] = useState({ mic: 0, system: 0, pads: 0 });
@@ -201,6 +205,14 @@ const Broadcaster = () => {
       if (!valid) navigate('/login');
     });
   }, [navigate]);
+
+  // Auto-identify availability depends on the server having an AcoustID key
+  useEffect(() => {
+    fetch(`${API_BASE}/api/capabilities`, { credentials: 'include' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => setAutoIdentifyAvailable(Boolean(data?.autoIdentify)))
+      .catch(() => setAutoIdentifyAvailable(false));
+  }, []);
 
   // Check for a recoverable broadcast on mount
   useEffect(() => {
@@ -659,6 +671,31 @@ const Broadcaster = () => {
     }
   }, [relayStream.error, addLog]);
 
+  // Surface integration relay reconnect status
+  const prevRelayStatusRef = useRef<RelayStatus>(null);
+  useEffect(() => {
+    const prev = prevRelayStatusRef.current;
+    prevRelayStatusRef.current = integrationStream.relayStatus;
+    if (integrationStream.relayStatus === 'reconnecting' && prev !== 'reconnecting') {
+      addLog('Streaming server connection lost. Reconnecting…', 'warn');
+    }
+    if (integrationStream.relayStatus === 'connected' && prev === 'reconnecting') {
+      addLog('Reconnected to streaming server');
+    }
+  }, [integrationStream.relayStatus, addLog]);
+
+  // Auto-identify: fingerprint the broadcast and add recognized songs to the track list
+  useAutoIdentify({
+    stream: isOnAir && autoIdentifyOn ? mixer.mixedStream : null,
+    enabled: isOnAir && autoIdentifyOn && autoIdentifyAvailable,
+    existingTitles: trackList.map((t) => t.title),
+    onMatch: (match) => {
+      const text = `${match.artist} - ${match.title}`;
+      signaling.send({ type: 'add-track', text, artist: match.artist, trackTitle: match.title });
+      addLog(`Auto-identified: ${text}`);
+    },
+  });
+
   useEffect(() => {
     if (integrationStream.error) {
       addLog(integrationStream.error, 'error');
@@ -977,6 +1014,7 @@ const Broadcaster = () => {
     if (typeof saved.padsMonitor === 'boolean') setPadsMonitor(saved.padsMonitor);
     if (typeof saved.duckPads === 'boolean') setDuckPads(saved.duckPads);
     if (typeof saved.duckSystem === 'boolean') setDuckSystem(saved.duckSystem);
+    if (typeof saved.autoIdentify === 'boolean') setAutoIdentifyOn(saved.autoIdentify);
 
     if (saved.sideTab && ['sounds', 'effects', 'tracks', 'log'].includes(saved.sideTab)) {
       setSideTab(saved.sideTab);
@@ -1008,6 +1046,7 @@ const Broadcaster = () => {
       padsMonitor,
       duckPads,
       duckSystem,
+      autoIdentify: autoIdentifyOn,
       selectedDevice,
       sideTab,
       effects: micEffects.effects,
@@ -1037,6 +1076,7 @@ const Broadcaster = () => {
     padsMonitor,
     duckPads,
     duckSystem,
+    autoIdentifyOn,
     selectedDevice,
     sideTab,
     micEffects.effects,
@@ -1145,6 +1185,24 @@ const Broadcaster = () => {
             >
               <Keyboard className="h-4 w-4" aria-hidden />
             </button>
+            {autoIdentifyAvailable && (
+              <button
+                onClick={() => {
+                  setAutoIdentifyOn((v) => {
+                    addLog(v ? 'Auto-identify off' : 'Auto-identify on: recognized songs are added to the track list');
+                    return !v;
+                  });
+                }}
+                aria-pressed={autoIdentifyOn}
+                aria-label={autoIdentifyOn ? 'Turn off automatic song identification' : 'Turn on automatic song identification'}
+                className={`transition-colors ${
+                  autoIdentifyOn ? 'text-primary' : 'text-muted-foreground/40 hover:text-muted-foreground'
+                }`}
+                title={autoIdentifyOn ? 'Auto-identify is on' : 'Auto-identify songs playing in your broadcast'}
+              >
+                <Ear className="h-4 w-4" aria-hidden />
+              </button>
+            )}
           </div>
           {!isOnAir && (
             <button
