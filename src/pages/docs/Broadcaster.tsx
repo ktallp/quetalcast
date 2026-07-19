@@ -2,256 +2,379 @@ export default function DocsBroadcaster() {
   return (
     <div className="prose prose-invert prose-sm max-w-none text-muted-foreground leading-relaxed [&_strong]:text-foreground space-y-10">
       <p className="text-base">
-        The broadcaster view is where you control your stream. All panels (Audio Input, Level Meter,
-        Audio Controls, Track List, Sounds / Effects, Stats, Event Log) have icons in their headers for
-        consistency. Audio controls and the track list are visible before you go on air so you can
-        prepare in advance.
+        The broadcaster console is where you run your show. Everything you need while live sits on
+        one screen: level meter and transport on the left, and a tabbed side panel (Sounds,
+        Effects, Tracks, Log) on the right.
       </p>
 
       <section>
-        <h2 className="text-lg font-semibold text-foreground mb-3">Level meter</h2>
-        <p>
-          The level meter is at the <strong>top of the page</strong> so you can see it immediately.
-          It works as soon as you select a microphone — a preview stream feeds it before you go on
-          air, so you can dial in levels and do a level check before going live. Once on air, it
-          shows the mixed broadcast output.
-        </p>
-        <p className="mt-2">
-          The meter shows left (L) and right (R) channels. Green is good, yellow is getting loud,
-          red is too hot. A <strong>CLIP</strong> warning means your audio is maxing out — turn it
-          down. Aim to keep things in the green, occasionally peaking into yellow.
-        </p>
-      </section>
-
-      <section>
-        <h2 className="text-lg font-semibold text-foreground mb-3">Audio controls</h2>
-        <p>
-          The audio controls panel is visible <strong>before</strong> you go on air. Expand it to access:
-        </p>
+        <h2 className="text-lg font-semibold text-foreground mb-3">The console at a glance</h2>
+        <img
+          src="/docs-img/console-offair.png"
+          alt="The console before going live: level meter, Go On Air transport, Audio Setup, mixer, and the Sounds tab with pad banks"
+          className="rounded-lg border border-border my-4"
+          loading="lazy"
+        />
         <ul className="list-disc list-inside mt-2 space-y-1 pl-1">
           <li>
-            <strong>Mute, Listen, Cue, Limiter</strong> — Top row. Mute silences your mic; Listen lets you hear
-            what listeners hear (on air only); Cue previews sounds for you only (on air only); Limiter
-            sets the ceiling (0, -3, -6, or -12 dB).
+            <strong>Status bar</strong> (top): your on-air state, room ID, a REC indicator while
+            recording, the on-air timer, and the current listener count. You never have to scroll
+            to find your vitals.
           </li>
           <li>
-            <strong>Audio input</strong> — Select your microphone or audio interface. At the top so the
-            level meter above can show input as soon as you choose.
+            <strong>Left column</strong>: the input level meter, the transport (Go On Air, Rec,
+            Mute, Listen, Cue, Limit), the collapsible Audio Setup, and the always-visible Mixer.
           </li>
           <li>
-            <strong>System audio</strong> — Route desktop or app audio into your broadcast. Connect button
-            only; volume and pan are in the Mixer Board below. Browser asks for screen share with
-            audio; video is discarded.
-          </li>
-          <li>
-            <strong>Audio quality</strong> — High (510 kbps), Auto (adaptive), or Low (32 kbps mono).
-          </li>
-          <li>
-            <strong>Record</strong> — Save as 320 kbps MP3. Start before going on air to capture
-            from the moment you hit record, or during broadcast for the full mix.
-          </li>
-          <li>
-            <strong>Mixer Board</strong> — Collapsible section with channel strips in this order: Mic,
-            SOUND PADS, then System Audio. Each strip has a level slider, Mute (M), Solo (S), and
-            Headphone Monitor buttons, plus a pan knob. The headphone button (green when active)
-            toggles local monitoring for that channel — hear it through your speakers/headphones
-            without affecting the broadcast. Pads monitor is on by default; Mic and System are off.
-            Use the pads monitor toggle to play soundboard clips to listeners without hearing them
-            yourself. A vertical LED signal meter (live audio level, not slider value)
-            appears at the left of each strip label. Strip labels also show the current level inline
-            (for example, <code>Mic 100%</code>). Pan readouts are always visible above each knob; drag
-            or mouse-wheel to adjust stereo position, and double-click to center. System Audio strip
-            is grayed when not connected. Monitor states are persisted to localStorage.
+            <strong>Right column</strong>: a tabbed panel with Sounds, Effects, Tracks, and Log.
+            Your last-used tab is remembered.
           </li>
         </ul>
-      </section>
-
-      <section>
-        <h2 className="text-lg font-semibold text-foreground mb-3">Saved layout</h2>
-        <p>
-          Broadcaster layout is saved to <code>localStorage</code> and restored on reload. This includes
-          sound pads, mixer strip values (volume, mute, solo, pan, monitor), effects state and
-          parameters, quality mode, and selected input device.
-        </p>
-      </section>
-
-      <section>
-        <h2 className="text-lg font-semibold text-foreground mb-3">Custom receive URL</h2>
-        <p>
-          Before going on air, the <strong>Receive URL</strong> panel lets you set a custom slug for
-          your receive link. For example, type <code>elpasorocks</code> and listeners can go to{" "}
-          <code>/receive/elpasorocks</code>. Leave it blank to auto-generate a random ID.
-        </p>
         <p className="mt-2">
-          Rules: lowercase letters, numbers, and hyphens only. 3–40 characters. No leading or
-          trailing hyphens, no consecutive hyphens.
-        </p>
-        <p className="mt-2">
-          Previously used slugs are stored on the server and shown as suggestions when you focus
-          the input — each one displays a live/available status indicator. You can remove saved
-          slugs with the X button. Custom slugs can be freely reused across broadcasts; they are
-          only blocked while a room with that slug is currently live.
+          The level meter works as soon as you select a microphone, so you can check levels before
+          going live. Green is good, yellow is getting loud, red is too hot. A <strong>CLIP</strong>{' '}
+          warning means your audio is maxing out.
         </p>
       </section>
 
       <section>
         <h2 className="text-lg font-semibold text-foreground mb-3">Going on air</h2>
         <p>
-          Press <strong>Go On Air</strong> to open the broadcast settings modal. Here you can set:
+          Press <strong>Go On Air</strong>. The button shows a pending state ("Requesting mic…")
+          while your browser asks for microphone access, then a settings modal lets you set a{' '}
+          <strong>stream title</strong>, <strong>description</strong>, and a custom{' '}
+          <strong>receive URL</strong> slug (for example <code>/receive/elpasorocks</code>). Click{' '}
+          <strong>Save &amp; Start</strong> to go live, or <strong>Skip</strong> to start with
+          defaults. Title and description are remembered for next time.
         </p>
-        <ul className="list-disc list-inside mt-2 space-y-1 pl-1">
-          <li>
-            <strong>Stream Title</strong> — Shown as the station name in VLC, RadioDJ, and other
-            media players (sent as the <code>icy-name</code> header).
-          </li>
-          <li>
-            <strong>Description</strong> — Included in stream headers for directories and players.
-          </li>
-          <li>
-            <strong>Receive URL</strong> — Custom slug or auto-generated. Previously used slugs
-            appear as suggestions with live/available status.
-          </li>
-        </ul>
+        <img
+          src="/docs-img/console-onair.png"
+          alt="The console while live: End Broadcast with timer, REC indicator, listener count, Receive link and Stream link buttons, and DUCK buttons in the mixer"
+          className="rounded-lg border border-border my-4"
+          loading="lazy"
+        />
         <p className="mt-2">
-          Click <strong>Save &amp; Start</strong> to apply settings and go live, or{" "}
-          <strong>Skip</strong> to start immediately with defaults. Title and description are
-          remembered in localStorage for next time.
+          While live, the Go On Air button becomes <strong>End Broadcast</strong> with the elapsed
+          time on it. Ending asks for confirmation and reminds you how long you have been on air
+          and how many listeners are connected, so a stray click can't kill your show.
         </p>
         <p className="mt-2">
-          Once on air, a timer shows how long you've been live. The room ID appears in the status
-          bar and in the URL (<code>?room=...</code>). Use <strong>Copy Receiver Link</strong> in
-          the top right to share.
-        </p>
-        <p className="mt-2">
-          If you have a previous broadcast (track list or logs including "Off air"), a dialog
-          appears first: download logs and track list as a ZIP (including MP3 if recording was
-          active), copy the room link (24h access), continue the previous broadcast (rejoin same
-          room, keep logs and track list), or start a new broadcast.
+          If you have data from a previous broadcast, a dialog appears first: download logs and
+          track list as a ZIP (including the MP3 if you were recording), copy the old room link
+          (valid for 24 hours), continue the previous broadcast, or start fresh.
         </p>
       </section>
 
       <section>
-        <h2 className="text-lg font-semibold text-foreground mb-3">Broadcast recovery</h2>
+        <h2 className="text-lg font-semibold text-foreground mb-3">Transport controls</h2>
+        <ul className="list-disc list-inside mt-2 space-y-1 pl-1">
+          <li>
+            <strong>Rec</strong>: record the broadcast as a 320 kbps MP3. Works before and during
+            the broadcast. See Recording below.
+          </li>
+          <li>
+            <strong>Mute</strong>: silences all channels going to listeners. (Space)
+          </li>
+          <li>
+            <strong>Listen</strong>: hear what your listeners hear. On air only. (L)
+          </li>
+          <li>
+            <strong>CUE</strong>: preview sound pads privately; they play for you but not for
+            listeners. On air only. (C)
+          </li>
+          <li>
+            <strong>Limit</strong>: the output limiter ceiling (0, -3, -6, or -12 dB). Keeps
+            peaks from clipping no matter what you throw at the mix.
+          </li>
+        </ul>
+      </section>
+
+      <section>
+        <h2 className="text-lg font-semibold text-foreground mb-3">Audio Setup</h2>
         <p>
-          If you accidentally close your browser, lose your internet connection, or your computer
-          restarts, your broadcast isn't immediately lost. The server keeps the stream alive by
-          feeding silent audio to any connected media players (VLC, RadioDJ, etc.) for up to{" "}
-          <strong>10 minutes</strong>.
+          The <strong>Audio Setup</strong> panel is expanded before you go live and collapses out
+          of the way once you're on air. It holds:
         </p>
-        <p className="mt-2">
-          When you reopen the broadcaster page, you'll see a prompt asking if you want to resume
-          your previous broadcast. Click <strong>Resume Broadcast</strong> to reconnect — your
-          mic goes live again and the silence is replaced with your audio. Media player listeners
-          stay connected the whole time.
+        <ul className="list-disc list-inside mt-2 space-y-1 pl-1">
+          <li>
+            <strong>Input Source</strong>: your microphone or audio interface. The level meter
+            responds as soon as you pick one.
+          </li>
+          <li>
+            <strong>System Audio</strong>: route desktop or app audio (Spotify, a browser tab,
+            anything) into your broadcast. Your browser asks for screen share with audio; the
+            video is discarded immediately and nothing on screen is recorded.
+          </li>
+          <li>
+            <strong>Audio Quality</strong>: High (510 kbps stereo), Auto (adapts to connection
+            health), or Low (32 kbps mono for slow connections).
+          </li>
+        </ul>
+      </section>
+
+      <section>
+        <h2 className="text-lg font-semibold text-foreground mb-3">Mixer</h2>
+        <p>
+          The mixer is always visible with one strip per channel: <strong>Mic</strong>,{' '}
+          <strong>Sound Pads</strong>, and <strong>System Audio</strong> (grayed out until
+          connected). Each strip has:
         </p>
-        <p className="mt-2">
-          If you choose <strong>Start Fresh</strong> instead, the previous broadcast is ended and
-          you can begin a new one.
+        <ul className="list-disc list-inside mt-2 space-y-1 pl-1">
+          <li>
+            <strong>LED meter</strong>: a vertical LED ladder showing the live audio level on that
+            channel, not the slider position.
+          </li>
+          <li>
+            <strong>M / S buttons</strong>: mute or solo the channel.
+          </li>
+          <li>
+            <strong>Headphone monitor</strong>: hear that channel locally through your
+            speakers/headphones without affecting the broadcast. Handy in reverse too: turn the
+            pads monitor off to fire clips at listeners without hearing them yourself.
+          </li>
+          <li>
+            <strong>DUCK</strong> (Sound Pads and System Audio): auto-ducking. See below.
+          </li>
+          <li>
+            <strong>Volume slider</strong> and a <strong>pan knob</strong>. Drag or mouse-wheel
+            the knob, double-click to re-center, or use the arrow keys when it's focused. On
+            phones the knob is replaced by simple L / C / R buttons.
+          </li>
+        </ul>
+
+        <h3 className="text-base font-semibold text-foreground mt-6 mb-2">Ducking</h3>
+        <p>
+          Turn on <strong>DUCK</strong> on a music channel and it automatically dips by about 9 dB
+          whenever you speak, then eases back up when you stop. It's the classic radio move: talk
+          over the intro without touching a fader. The DUCK button pulses while ducking is
+          actively pulling the channel down.
         </p>
       </section>
 
       <section>
         <h2 className="text-lg font-semibold text-foreground mb-3">Sounds</h2>
         <p>
-          The grid of pads below the controls is your sounds grid. Tap an empty pad to load an
+          The <strong>Sounds</strong> tab holds your pads: three banks (<strong>A</strong>,{' '}
+          <strong>B</strong>, <strong>C</strong>) of 10 pads each. Tap an empty pad to load an
           audio file. Once loaded:
         </p>
         <ul className="list-disc list-inside mt-2 space-y-1 pl-1">
-          <li>Tap to play or stop.</li>
-          <li>Loop icon (top right) — repeat continuously.</li>
-          <li>Gear icon (bottom right) — rename or boost volume (up to 300%).</li>
-          <li>X (top left) — remove the clip.</li>
+          <li>Tap to play or stop. A progress ring shows how far through the clip you are.</li>
+          <li>Keys <strong>1 to 9 and 0</strong> trigger pads 1 to 10 in the active bank.</li>
+          <li>Drag pads to reorder them within a bank.</li>
+          <li>Loop icon: repeat the clip continuously.</li>
+          <li>Gear icon: rename the pad or boost its volume up to 300%.</li>
+          <li>X: remove the clip. Removal asks for confirmation.</li>
         </ul>
         <p className="mt-2">
-          Everything on the sounds grid is mixed into your broadcast. Use Cue mode to preview clips
-          privately before playing them on air.
+          Pads are mixed into your broadcast through the Sound Pads channel. Use{' '}
+          <strong>CUE</strong> to preview clips privately before playing them on air. Your pads,
+          banks, and settings are saved locally and restored on reload.
         </p>
       </section>
 
       <section>
-        <h2 className="text-lg font-semibold text-foreground mb-3">Sounds & Effects</h2>
+        <h2 className="text-lg font-semibold text-foreground mb-3">Effects</h2>
+        <img
+          src="/docs-img/console-effects.png"
+          alt="The Effects tab: Voice section with Sound check and Hold to bypass, gate and compressor meters, FX Pads with Q/W/E/T keycaps, Manual Effects, and Presets"
+          className="rounded-lg border border-border my-4"
+          loading="lazy"
+        />
         <p>
-          The <strong>Sounds / Effects</strong> section is collapsible. When expanded, use the
-          music and sparkle icons to switch between <strong>Sounds</strong> (the pad grid) and{' '}
-          <strong>Effects</strong> (real-time mic effects).
+          The <strong>Effects</strong> tab processes your mic only; sound pads and system audio are
+          never affected. It's split into three groups.
         </p>
-        <p className="mt-2">
-          In <strong>Effects</strong> mode, tap an effect pad to turn it on or off.
+
+        <h3 className="text-base font-semibold text-foreground mt-6 mb-2">Voice</h3>
+        <p>
+          The always-useful processing chain: <strong>Enhance</strong> (noise gate, rumble filter,
+          clarity), <strong>Tone</strong> (bass, mids, treble), <strong>Compressor</strong> (evens
+          out your volume), and <strong>De-esser</strong> (tames harsh "s" sounds). Click a chip to
+          toggle it, or the small gear to adjust its settings. Two live meters show what the chain
+          is doing: a gate indicator that reads <strong>OPEN</strong> or <strong>CLOSED</strong>,
+          and a compressor gain-reduction bar with the current reduction in dB.
         </p>
         <ul className="list-disc list-inside mt-2 space-y-1 pl-1">
           <li>
-            <strong>Enhance</strong> — Noise gate, rumble filter, clarity boost.
+            <strong>Hold to bypass</strong>: press and hold to hear your raw, unprocessed mic.
+            Release to bring the processing back. Great for a quick before/after comparison.
           </li>
           <li>
-            <strong>Reverb</strong> — Room or hall ambience.
-          </li>
-          <li>
-            <strong>Voice Shift</strong> — Deeper or brighter voice.
-          </li>
-          <li>
-            <strong>Delay</strong> — Slapback or rhythmic echo.
-          </li>
-          <li>
-            <strong>Tone</strong> — Bass, mids, treble EQ.
-          </li>
-          <li>
-            <strong>Compressor</strong> — Evens out volume.
+            <strong>Sound check</strong> (optional): a ten-second measurement that tunes the noise
+            gate and compressor for your room and mic. Stay quiet for 3 seconds, then speak for 6
+            seconds; review the results and choose <strong>Apply settings</strong> or{' '}
+            <strong>Skip</strong>. It never runs on its own.
           </li>
         </ul>
-        <p className="mt-2">
-          Tap the gear icon to customize. Effects only apply to your mic — sound clips are not
-          affected. <strong>Presets</strong> (in the effects panel) save and recall effect profiles
-          only (not mixer settings). Built-in: Podcast Voice, DJ Mode, Lo-Fi. Save your own and
-          delete with the trash icon.
+
+        <h3 className="text-base font-semibold text-foreground mt-6 mb-2">FX Pads</h3>
+        <p>
+          Momentary performance effects: <strong>Radio Voice</strong>, <strong>Big Room</strong>,{' '}
+          <strong>Slapback</strong>, and <strong>Pitch Drop</strong>. Hold a pad (or its key:{' '}
+          <strong>Q</strong>, <strong>W</strong>, <strong>E</strong>, <strong>T</strong>) to apply
+          the effect while held; release and the tail rings out naturally. A quick tap latches the
+          effect on until you tap again.
+        </p>
+
+        <h3 className="text-base font-semibold text-foreground mt-6 mb-2">Manual Effects</h3>
+        <p>
+          <strong>Voice Shift</strong>, <strong>Delay</strong>, and <strong>Reverb</strong> stay in
+          the chain while enabled. Toggle them like the Voice chips, and use the gear to tune each
+          one.
+        </p>
+
+        <h3 className="text-base font-semibold text-foreground mt-6 mb-2">Presets</h3>
+        <p>
+          The presets row saves and recalls effect profiles. Click a preset to apply it, use{' '}
+          <strong>Save current…</strong> to store your own, and the trash icon to delete one
+          (deletion asks for confirmation). Built-ins can't be deleted.
         </p>
       </section>
 
       <section>
-        <h2 className="text-lg font-semibold text-foreground mb-3">Track list & Now Playing</h2>
+        <h2 className="text-lg font-semibold text-foreground mb-3">Tracks &amp; Now Playing</h2>
         <p>
-          The track list is always visible (collapsible). The <strong>Now Playing</strong> search
-          appears at the top when on air — Deezer autocomplete for artist/song, or type freeform.
-          Select one to add to the track list; metadata is sent to all listeners in real time and
-          pushed to integrations.
+          The <strong>Tracks</strong> tab has the Now Playing search at the top: Deezer
+          autocomplete for artist and song, or type freeform text. Committing a track adds it to
+          the track list, sends it to all listeners in real time, and pushes it to any connected
+          integration. The current track is highlighted with a spinning disc; click any track for
+          details, and download the list as CSV with the icon next to the title.
         </p>
         <p className="mt-2">
-          Every track is shown chronologically; the current track is highlighted at the top with a
-          spinning disc. Click any track for a detail modal. Download the track list as CSV (icon
-          next to the title) — the file includes the room ID. Track additions appear in the event
-          log.
-        </p>
-      </section>
-
-      <section>
-        <h2 className="text-lg font-semibold text-foreground mb-3">Event log & Stats</h2>
-        <p>
-          The event log shows connection events, track additions, and chat messages. The header
-          displays the listener count when on air. Download as CSV (icon next to the title). Stats
-          panel shows speed, jitter, delay, and packet loss.
+          <strong>Auto-identify</strong>: if the server has an AcoustID key configured, an ear icon
+          appears in the console header. Turn it on and songs playing in your broadcast are
+          recognized automatically and added to the track list, no typing needed. If there's no
+          key on the server, the icon simply doesn't appear.
         </p>
       </section>
 
       <section>
         <h2 className="text-lg font-semibold text-foreground mb-3">Recording</h2>
         <p>
-          Press <strong>Record</strong> in the audio controls to capture as a 320 kbps stereo MP3. A
-          pulsing red dot shows when recording, with elapsed time and file size. When you stop,
-          the MP3 downloads automatically. Start recording before going on air to capture from the
-          moment you hit record (mic only); during broadcast you capture the full mix. If you end
-          the broadcast while recording, recording continues until you stop it or click Download ZIP
-          in the "Start New Broadcast" modal. Recording also continues when you click Start New
-          Broadcast — use the Record button or Download ZIP to stop and save.
+          Press <strong>Rec</strong> in the transport to capture a 320 kbps stereo MP3. While
+          recording, the button shows the elapsed time and a <strong>REC</strong> indicator pulses
+          in the status bar. Start before going on air to capture your mic from the moment you hit
+          record, or during the broadcast to capture the full mix. When you stop, the MP3 downloads
+          in your browser.
+        </p>
+        <p className="mt-2">
+          Ending the broadcast does not stop the recording: it continues until you stop it
+          yourself or save it through the ZIP download in the start-new-broadcast dialog, so you
+          never lose a take by ending the show first.
         </p>
       </section>
 
       <section>
-        <h2 className="text-lg font-semibold text-foreground mb-3">Ending the broadcast</h2>
+        <h2 className="text-lg font-semibold text-foreground mb-3">Sharing your broadcast</h2>
         <p>
-          Press <strong>End Broadcast</strong>. The room ID disappears. Listeners stop receiving
-          audio, but the room link remains valid for 24 hours so they can view the track list,
-          event log, and chat. Your logs and track list stay until you start a new broadcast. If
-          recording, it continues until you stop or start a new broadcast.
+          Once live, two copy buttons appear in the header. They point to different things:
         </p>
+        <ul className="list-disc list-inside mt-2 space-y-1 pl-1">
+          <li>
+            <strong>Receive link</strong>: the listener page (<code>/receive/&lt;room&gt;</code>)
+            for people tuning in with a browser. It has the Now Playing display, volume control,
+            track list, and chat. Live browser slots are limited to 4 per room; extra listeners are
+            offered the stream player instead.
+          </li>
+          <li>
+            <strong>Stream link</strong>: the raw MP3 stream URL (<code>/stream/&lt;room&gt;</code>)
+            for VLC, RadioDJ, and any media player that accepts HTTP audio. Use this one for radio
+            software or when you expect a bigger audience; it scales well beyond the browser
+            slots.
+          </li>
+        </ul>
+      </section>
+
+      <section>
+        <h2 className="text-lg font-semibold text-foreground mb-3">Keyboard shortcuts</h2>
+        <p>
+          Active while on air, and disabled whenever you're typing in a text field. Press{' '}
+          <strong>?</strong> or click the keyboard icon in the header to see this list in the app.
+        </p>
+        <div className="overflow-x-auto mt-3">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-border text-left">
+                <th className="py-2 pr-4 font-semibold text-foreground">Key</th>
+                <th className="py-2 font-semibold text-foreground">Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr className="border-b border-border/40">
+                <td className="py-2 pr-4"><code>Space</code></td>
+                <td className="py-2">Toggle mute</td>
+              </tr>
+              <tr className="border-b border-border/40">
+                <td className="py-2 pr-4"><code>R</code></td>
+                <td className="py-2">Toggle recording</td>
+              </tr>
+              <tr className="border-b border-border/40">
+                <td className="py-2 pr-4"><code>L</code></td>
+                <td className="py-2">Toggle listen</td>
+              </tr>
+              <tr className="border-b border-border/40">
+                <td className="py-2 pr-4"><code>C</code></td>
+                <td className="py-2">Toggle cue mode</td>
+              </tr>
+              <tr className="border-b border-border/40">
+                <td className="py-2 pr-4"><code>1</code> to <code>9</code>, <code>0</code></td>
+                <td className="py-2">Trigger sound pads 1 to 10 (active bank)</td>
+              </tr>
+              <tr className="border-b border-border/40">
+                <td className="py-2 pr-4"><code>Q</code> / <code>W</code> / <code>E</code> / <code>T</code></td>
+                <td className="py-2">
+                  Hold for Radio Voice / Big Room / Slapback / Pitch Drop FX (release to let the
+                  tail ring out)
+                </td>
+              </tr>
+              <tr>
+                <td className="py-2 pr-4"><code>?</code></td>
+                <td className="py-2">Show or hide the shortcuts reference</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section>
+        <h2 className="text-lg font-semibold text-foreground mb-3">On mobile</h2>
+        <p>
+          On phones the console stacks into one column and a bottom tab bar
+          (<strong>Mix</strong>, <strong>Pads</strong>, <strong>FX</strong>,{' '}
+          <strong>Tracks</strong>, <strong>Log</strong>) jumps you straight to each section. Pan
+          knobs become touch-friendly L / C / R buttons.
+        </p>
+        <img
+          src="/docs-img/console-mobile.png"
+          alt="The mobile console with the bottom tab bar: Mix, Pads, FX, Tracks, and Log"
+          className="rounded-lg border border-border my-4"
+          loading="lazy"
+        />
+      </section>
+
+      <section>
+        <h2 className="text-lg font-semibold text-foreground mb-3">Good to know</h2>
+        <ul className="list-disc list-inside mt-2 space-y-1 pl-1">
+          <li>
+            <strong>Everything survives restarts</strong>: broadcasts, track lists, and chat
+            history are stored server-side, so a server restart or deploy won't wipe your show.
+          </li>
+          <li>
+            <strong>Broadcast recovery</strong>: if your browser crashes or your connection drops,
+            the server feeds silence to connected media players for up to 10 minutes. Reopen the
+            console and you'll be offered <strong>Resume Broadcast</strong>; your audio replaces
+            the silence and stream listeners never disconnect.
+          </li>
+          <li>
+            <strong>Layout is saved</strong>: mixer settings, effects, pads, quality mode, and
+            your selected input device are stored locally and restored on reload.
+          </li>
+          <li>
+            <strong>Logout is global</strong>: logging out signs you out everywhere, not just in
+            the current browser.
+          </li>
+        </ul>
       </section>
     </div>
   );

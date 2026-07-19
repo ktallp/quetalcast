@@ -12,6 +12,7 @@ import DocsOverview from "./pages/docs/Overview";
 import DocsBroadcaster from "./pages/docs/Broadcaster";
 import DocsReceiver from "./pages/docs/Receiver";
 import DocsIntegrations from "./pages/docs/Integrations";
+import DocsAdmin from "./pages/docs/Admin";
 import Changelog from "./pages/Changelog";
 import NotFound from "./pages/NotFound";
 
@@ -32,6 +33,7 @@ const App = () => (
             <Route index element={<DocsOverview />} />
             <Route path="broadcaster" element={<DocsBroadcaster />} />
             <Route path="receiver" element={<DocsReceiver />} />
+            <Route path="admin" element={<DocsAdmin />} />
             <Route path="integrations" element={<DocsIntegrations />} />
           </Route>
           <Route path="*" element={<NotFound />} />
