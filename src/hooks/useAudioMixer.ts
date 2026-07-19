@@ -329,11 +329,11 @@ export function useAudioMixer(): UseAudioMixerReturn {
       micSourceRef.current = null;
     }
     if (micPrepSplitterRef.current) {
-      try { micPrepSplitterRef.current.disconnect(); } catch {}
+      try { micPrepSplitterRef.current.disconnect(); } catch { /* already disconnected */ }
       micPrepSplitterRef.current = null;
     }
     if (micPrepMergerRef.current) {
-      try { micPrepMergerRef.current.disconnect(); } catch {}
+      try { micPrepMergerRef.current.disconnect(); } catch { /* already disconnected */ }
       micPrepMergerRef.current = null;
     }
   }, []);
@@ -344,7 +344,7 @@ export function useAudioMixer(): UseAudioMixerReturn {
 
       // Disconnect previous system audio if any
       if (sysAudioSourceRef.current) {
-        try { sysAudioSourceRef.current.disconnect(); } catch {}
+        try { sysAudioSourceRef.current.disconnect(); } catch { /* already disconnected */ }
       }
 
       const source = ctx.createMediaStreamSource(stream);
@@ -393,7 +393,7 @@ export function useAudioMixer(): UseAudioMixerReturn {
 
   const disconnectSystemAudioInternal = useCallback(() => {
     if (sysAudioSourceRef.current) {
-      try { sysAudioSourceRef.current.disconnect(); } catch {}
+      try { sysAudioSourceRef.current.disconnect(); } catch { /* already disconnected */ }
       sysAudioSourceRef.current = null;
     }
     if (sysAudioGainRef.current) {

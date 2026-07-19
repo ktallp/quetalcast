@@ -889,7 +889,8 @@ app.post('/api/identify-audio', requireAuth, identifyLimiter, express.raw({ type
 const staticPath = path.join(__dirname, '..', 'dist');
 app.use(express.static(staticPath));
 app.get('*', (req, res, next) => {
-  if (req.path.startsWith('/api') || req.path.startsWith('/admin') || req.path.startsWith('/stream/')) return next();
+  // /admin (exact) is the SPA admin page; /admin/... paths are API routes
+  if (req.path.startsWith('/api') || req.path.startsWith('/admin/') || req.path.startsWith('/stream/')) return next();
   res.sendFile(path.join(staticPath, 'index.html'));
 });
 

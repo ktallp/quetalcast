@@ -356,7 +356,9 @@ export function useWebRTC(
         const offer = await pc.createOffer();
         const quality = effectiveQualityRef.current;
         const mungedSdp = mungeOpusSdp(offer.sdp!, quality);
-        const mungedOffer = { ...offer, sdp: mungedSdp };
+        // Build the init explicitly: spreading an RTCSessionDescription instance
+        // drops its prototype getters (type becomes undefined) in some browsers
+        const mungedOffer: RTCSessionDescriptionInit = { type: offer.type ?? 'offer', sdp: mungedSdp };
         await pc.setLocalDescription(mungedOffer);
         dbg(`[RTC:B] Offer created & sent to receiver ${receiverId}`);
         signaling.send({ type: 'offer', sdp: mungedOffer, receiverId });

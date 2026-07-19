@@ -2,7 +2,6 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react-swc";
 import path from "path";
 import fs from "fs";
-import { componentTagger } from "lovable-tagger";
 
 const appVersion = fs.readFileSync(path.resolve(__dirname, "VERSION"), "utf-8").trim();
 
@@ -21,7 +20,7 @@ export default defineConfig(({ mode }) => ({
       '/api': 'http://localhost:3001',
     },
   },
-  plugins: [react(), mode === "development" && componentTagger()].filter(Boolean),
+  plugins: [react()],
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),

@@ -30,3 +30,7 @@ data/
 *.njsproj
 *.sln
 *.sw?
+
+# Non-pnpm lockfiles (pnpm is the package manager)
+bun.lockb
+package-lock.json
