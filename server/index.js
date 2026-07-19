@@ -234,7 +234,8 @@ app.post('/api/users/:id/reset', requireAuth, requireOwner, (req, res) => {
   const user = storage.getUserById(req.params.id);
   if (!user) return res.status(404).json({ error: 'User not found' });
   const invite = createInviteFor(user.id, 'reset');
-  storage.revokeUserSessions(user.id);
+  // Sessions are revoked when the link is used (password actually changes),
+  // not when it is issued, so resetting your own password does not log you out.
   logger.info({ username: user.username }, 'Password reset invite issued');
   res.json({ ok: true, ...invite });
 });
@@ -242,11 +243,21 @@ app.post('/api/users/:id/reset', requireAuth, requireOwner, (req, res) => {
 app.patch('/api/users/:id', requireAuth, requireOwner, (req, res) => {
   const user = storage.getUserById(req.params.id);
   if (!user) return res.status(404).json({ error: 'User not found' });
-  const { disabled } = req.body || {};
-  if (typeof disabled !== 'boolean') {
-    return res.status(400).json({ error: 'Expected { disabled: boolean }' });
+  const { disabled, role } = req.body || {};
+  if (typeof disabled !== 'boolean' && role === undefined) {
+    return res.status(400).json({ error: 'Expected { disabled: boolean } and/or { role: "owner" | "dj" }' });
   }
-  if (disabled) {
+
+  if (role !== undefined) {
+    if (role !== 'owner' && role !== 'dj') {
+      return res.status(400).json({ error: 'Role must be "owner" or "dj"' });
+    }
+    if (role === 'dj' && user.role === 'owner' && !user.disabled && storage.countEnabledOwners() <= 1) {
+      return res.status(400).json({ error: 'Cannot demote the last enabled owner' });
+    }
+  }
+
+  if (typeof disabled === 'boolean' && disabled) {
     if (user.id === req.user.userId) {
       return res.status(400).json({ error: 'You cannot disable your own account' });
     }
@@ -254,9 +265,16 @@ app.patch('/api/users/:id', requireAuth, requireOwner, (req, res) => {
       return res.status(400).json({ error: 'Cannot disable the last enabled owner' });
     }
   }
-  storage.setUserDisabled(user.id, disabled);
-  if (disabled) storage.revokeUserSessions(user.id);
-  logger.info({ username: user.username, disabled }, 'User disabled flag updated');
+
+  if (role !== undefined && role !== user.role) {
+    storage.setUserRole(user.id, role);
+    logger.info({ username: user.username, role }, 'User role updated');
+  }
+  if (typeof disabled === 'boolean') {
+    storage.setUserDisabled(user.id, disabled);
+    if (disabled) storage.revokeUserSessions(user.id);
+    logger.info({ username: user.username, disabled }, 'User disabled flag updated');
+  }
   res.json({ ok: true, user: serializeUser(storage.getUserById(user.id)) });
 });
 
@@ -300,6 +318,9 @@ app.post('/api/invite/:token', loginLimiter, (req, res) => {
   }
   storage.setUserPassword(resolved.user.id, hashPassword(password));
   storage.markInviteUsed(resolved.invite.token);
+  // The password just changed, so every existing session for this user is revoked.
+  // For first-time invites there are none; for resets this signs out old sessions.
+  storage.revokeUserSessions(resolved.user.id);
   logger.info({ username: resolved.user.username, purpose: resolved.invite.purpose }, 'Invite completed - password set');
   res.json({ ok: true });
 });

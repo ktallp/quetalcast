@@ -169,6 +169,10 @@ export class Storage {
     this.db.prepare('UPDATE users SET disabled = ? WHERE id = ?').run(disabled ? 1 : 0, id);
   }
 
+  setUserRole(id, role) {
+    this.db.prepare('UPDATE users SET role = ? WHERE id = ?').run(role, id);
+  }
+
   deleteUser(id) {
     this.db.prepare('DELETE FROM users WHERE id = ?').run(id);
     this.db.prepare('DELETE FROM sessions WHERE user_id = ?').run(id);

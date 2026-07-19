@@ -72,8 +72,14 @@ export default function DocsAdmin() {
         <h3 className="text-base font-semibold text-foreground mt-6 mb-2">Managing users</h3>
         <ul className="list-disc list-inside mt-2 space-y-1 pl-1">
           <li>
+            <strong>Change role</strong> (shield icon): promote a DJ to Owner or turn an Owner back
+            into a DJ. Confirmed before it happens, and the last remaining Owner can't be demoted.
+          </li>
+          <li>
             <strong>Reset password</strong> (key icon): generates a fresh 24-hour link where the
             user sets a new password. Handy for forgotten passwords and expired invites alike.
+            Nothing changes until the link is used; once the new password is set, their old
+            sessions are signed out.
           </li>
           <li>
             <strong>Disable</strong> (ban icon): the user can no longer sign in, and any active

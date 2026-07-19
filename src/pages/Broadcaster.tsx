@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { isAuthenticated, verifySession } from '@/lib/auth';
 import { useSignaling } from '@/hooks/useSignaling';
 import { useWebRTC, type ConnectionStatus, type AudioQuality } from '@/hooks/useWebRTC';
@@ -10,7 +10,7 @@ import { HealthPanel } from '@/components/HealthPanel';
 import { EventLog, createLogEntry, type LogEntry } from '@/components/EventLog';
 import {
   Mic, Radio, Music, Sparkles, Zap, Plug2, Keyboard, Monitor, MonitorOff,
-  Download, SlidersHorizontal, Copy, ListMusic, ScrollText, Ear,
+  Download, SlidersHorizontal, Copy, ListMusic, ScrollText, Ear, Shield,
 } from 'lucide-react';
 import { toast } from '@/components/ui/sonner';
 import {
@@ -1204,30 +1204,40 @@ const Broadcaster = () => {
               </button>
             )}
           </div>
-          {!isOnAir && (
-            <button
-              onClick={() => setIntegrationsOpen(true)}
-              className={`flex items-center gap-1.5 text-xs font-mono transition-colors px-3 py-1.5 rounded-md ${
-                selectedIntegration
-                  ? 'text-primary bg-primary/10 hover:bg-primary/20'
-                  : 'text-muted-foreground hover:text-foreground bg-secondary'
-              }`}
+          <div className="flex items-center gap-2 flex-wrap">
+            {!isOnAir && (
+              <button
+                onClick={() => setIntegrationsOpen(true)}
+                className={`flex items-center gap-1.5 text-xs font-mono transition-colors px-3 py-1.5 rounded-md ${
+                  selectedIntegration
+                    ? 'text-primary bg-primary/10 hover:bg-primary/20'
+                    : 'text-muted-foreground hover:text-foreground bg-secondary'
+                }`}
+              >
+                <Plug2 className="h-3 w-3" aria-hidden />
+                {selectedIntegration ? integrationInfo?.name : 'Integrations'}
+              </button>
+            )}
+            {isOnAir && webrtc.roomId && (
+              <>
+                {selectedIntegration && integrationInfo && (
+                  <span className="flex items-center gap-1.5 text-xs font-mono text-primary bg-primary/10 px-3 py-1.5 rounded-md">
+                    <Radio className="h-3 w-3" aria-hidden />
+                    Streaming on {integrationInfo.name}
+                  </span>
+                )}
+                <ShareLinks roomId={webrtc.roomId} />
+              </>
+            )}
+            <Link
+              to="/admin"
+              className="flex items-center gap-1.5 text-xs font-mono text-muted-foreground hover:text-foreground transition-colors bg-secondary px-3 py-1.5 rounded-md"
+              aria-label="Open the admin dashboard"
             >
-              <Plug2 className="h-3 w-3" aria-hidden />
-              {selectedIntegration ? integrationInfo?.name : 'Integrations'}
-            </button>
-          )}
-          {isOnAir && webrtc.roomId && (
-            <div className="flex items-center gap-2 flex-wrap">
-              {selectedIntegration && integrationInfo && (
-                <span className="flex items-center gap-1.5 text-xs font-mono text-primary bg-primary/10 px-3 py-1.5 rounded-md">
-                  <Radio className="h-3 w-3" aria-hidden />
-                  Streaming on {integrationInfo.name}
-                </span>
-              )}
-              <ShareLinks roomId={webrtc.roomId} />
-            </div>
-          )}
+              <Shield className="h-3 w-3" aria-hidden />
+              Admin
+            </Link>
+          </div>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-[1fr_400px] gap-4 items-start">

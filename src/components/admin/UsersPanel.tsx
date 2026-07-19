@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { toast } from 'sonner';
-import { UserPlus, KeyRound, Ban, CircleCheck, Trash2, Copy, AlertTriangle, Loader2 } from 'lucide-react';
+import { UserPlus, KeyRound, Ban, CircleCheck, Trash2, Copy, AlertTriangle, Loader2, ShieldPlus, ShieldMinus } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
@@ -79,7 +79,7 @@ export function UsersPanel() {
   const [busy, setBusy] = useState(false);
 
   const [invite, setInvite] = useState<InviteInfo | null>(null);
-  const [confirm, setConfirm] = useState<{ type: 'disable' | 'delete'; user: AdminUser } | null>(null);
+  const [confirm, setConfirm] = useState<{ type: 'disable' | 'delete' | 'role'; user: AdminUser } | null>(null);
 
   const loadUsers = useCallback(async () => {
     try {
@@ -173,6 +173,26 @@ export function UsersPanel() {
     }
   };
 
+  const setRole = async (user: AdminUser, role: 'owner' | 'dj') => {
+    try {
+      const res = await fetch(`/api/users/${encodeURIComponent(user.id)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ role }),
+      });
+      if (res.ok) {
+        toast.success(`${user.username} is now ${role === 'owner' ? 'an Owner' : 'a DJ'}`);
+        loadUsers();
+      } else {
+        const err = await res.json().catch(() => ({ error: 'Failed to change role' }));
+        toast.error(err.error || 'Failed to change role');
+      }
+    } catch {
+      toast.error('Could not reach server');
+    }
+  };
+
   const handleDelete = async (user: AdminUser) => {
     try {
       const res = await fetch(`/api/users/${encodeURIComponent(user.id)}`, {
@@ -196,6 +216,8 @@ export function UsersPanel() {
     setBusy(true);
     if (confirm.type === 'disable') {
       await setDisabled(confirm.user, true);
+    } else if (confirm.type === 'role') {
+      await setRole(confirm.user, confirm.user.role === 'owner' ? 'dj' : 'owner');
     } else {
       await handleDelete(confirm.user);
     }
@@ -283,6 +305,20 @@ export function UsersPanel() {
                     </td>
                     <td className="py-2.5">
                       <div className="flex items-center justify-end gap-1">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                          onClick={() => setConfirm({ type: 'role', user })}
+                          aria-label={user.role === 'owner' ? `Make ${user.username} a DJ` : `Make ${user.username} an Owner`}
+                          title={user.role === 'owner' ? 'Change role to DJ' : 'Change role to Owner'}
+                        >
+                          {user.role === 'owner' ? (
+                            <ShieldMinus className="h-3.5 w-3.5" />
+                          ) : (
+                            <ShieldPlus className="h-3.5 w-3.5" />
+                          )}
+                        </Button>
                         <Button
                           variant="ghost"
                           size="icon"
@@ -407,9 +443,20 @@ export function UsersPanel() {
               {invite?.purpose === 'reset' ? 'Password reset link' : 'Invite link'}
             </DialogTitle>
             <DialogDescription>
-              Share this link with{' '}
-              <span className="font-mono text-foreground">{invite?.username}</span>. They set their
-              own password on first sign-in. Link expires in 24 hours.
+              {invite?.purpose === 'reset' ? (
+                <>
+                  Share this link with{' '}
+                  <span className="font-mono text-foreground">{invite?.username}</span>. They choose a
+                  new password when they open it; once they do, their old sessions are signed out.
+                  Nothing changes until the link is used. Link expires in 24 hours.
+                </>
+              ) : (
+                <>
+                  Share this link with{' '}
+                  <span className="font-mono text-foreground">{invite?.username}</span>. They set their
+                  own password on first sign-in. Link expires in 24 hours.
+                </>
+              )}
             </DialogDescription>
           </DialogHeader>
           <div className="flex items-center gap-2">
@@ -437,7 +484,11 @@ export function UsersPanel() {
         <DialogContent className="max-w-sm">
           <DialogHeader>
             <DialogTitle>
-              {confirm?.type === 'delete' ? 'Delete user?' : 'Disable user?'}
+              {confirm?.type === 'delete'
+                ? 'Delete user?'
+                : confirm?.type === 'role'
+                  ? confirm.user.role === 'owner' ? 'Change role to DJ?' : 'Make this user an Owner?'
+                  : 'Disable user?'}
             </DialogTitle>
             <DialogDescription>
               {confirm?.type === 'delete' ? (
@@ -446,6 +497,18 @@ export function UsersPanel() {
                   <span className="font-mono text-foreground">{confirm?.user.username}</span> and
                   cannot be undone.
                 </>
+              ) : confirm?.type === 'role' ? (
+                confirm.user.role === 'owner' ? (
+                  <>
+                    <span className="font-mono text-foreground">{confirm?.user.username}</span> will
+                    lose access to user management and owner-only actions.
+                  </>
+                ) : (
+                  <>
+                    <span className="font-mono text-foreground">{confirm?.user.username}</span> will
+                    be able to manage users, end any broadcast, and everything else an Owner can do.
+                  </>
+                )
               ) : (
                 <>
                   <span className="font-mono text-foreground">{confirm?.user.username}</span> will
@@ -463,7 +526,13 @@ export function UsersPanel() {
               onClick={handleConfirm}
               disabled={busy}
             >
-              {busy ? 'Working…' : confirm?.type === 'delete' ? 'Delete' : 'Disable'}
+              {busy
+                ? 'Working…'
+                : confirm?.type === 'delete'
+                  ? 'Delete'
+                  : confirm?.type === 'role'
+                    ? 'Change role'
+                    : 'Disable'}
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -13,6 +13,18 @@ export interface ChangelogEntry {
 export const CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-18',
+    version: '0.6.1',
+    items: [
+      'Owners can change an existing user\'s role between DJ and Owner from the admin Users tab',
+    ],
+    fixes: [
+      'Admin link in the console header for signed-in broadcasters',
+      'Issuing a password reset link no longer signs the user out; old sessions are revoked only when the new password is actually set',
+      'Reset-link dialog wording now matches what actually happens',
+    ],
+  },
+  {
+    date: '2026-07-18',
     version: '0.6.0',
     items: [
       'Redesigned broadcaster console: two-column layout with a persistent transport bar, always-visible mixer, and tabbed side panel (Sounds, Effects, Tracks, Log)',
