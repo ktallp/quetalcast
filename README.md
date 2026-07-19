@@ -124,6 +124,10 @@ The project includes a multi-stage `Dockerfile` and `fly.toml` for [Fly.io](http
 # Install Fly CLI: https://fly.io/docs/getting-started/installing-flyctl/
 fly launch
 
+# Create the persistent volume for the SQLite database (required: fly.toml
+# mounts it at /data)
+fly volumes create data --size 1 --region dfw
+
 # Set secrets
 fly secrets set SESSION_SECRET="your-random-secret"
 fly secrets set ADMIN_PASSWORD="your-password"
@@ -143,8 +147,10 @@ fly deploy
 | `PORT` | `3001` | Server listen port |
 | `ALLOWED_ORIGIN` | `*` | CORS origin (set to your domain in production) |
 | `REQUIRE_TLS` | `false` | Require HTTPS for cookies |
-| `SESSION_SECRET` | `dev-secret...` | Session cookie signing secret |
-| `ADMIN_PASSWORD` | `admin` | Broadcaster login password |
+| `SESSION_SECRET` | `dev-secret...` | Session cookie signing secret (must be changed for production; the server refuses to boot in production with the dev default) |
+| `ADMIN_PASSWORD` | `admin` | Password seeded for the initial `admin` owner account on first boot (ignored once users exist) |
+| `DATA_DIR` | `./data` | Directory for persistent data (SQLite database). Set to `/data` on Fly.io |
+| `NODE_ENV` | (unset) | Set to `production` in deployments: forces Secure session cookies and enables the boot-time credential guard |
 | `METERED_APP_NAME` | — | Metered.ca app name for dynamic TURN credentials |
 | `METERED_API_KEY` | — | Metered.ca API key |
 | `TURN_URL` | — | Static TURN server URL (alternative to Metered) |

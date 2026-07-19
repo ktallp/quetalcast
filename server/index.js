@@ -4,9 +4,12 @@ import { WebSocketServer } from 'ws';
 import cookieParser from 'cookie-parser';
 import rateLimit from 'express-rate-limit';
 import { spawn, execFileSync } from 'child_process';
+import crypto from 'crypto';
+import fs from 'fs';
 import { createLogger } from './logger.js';
 import { RoomManager } from './room-manager.js';
-import { SessionManager } from './auth.js';
+import { SessionManager, hashPassword, verifyPassword } from './auth.js';
+import { Storage } from './storage.js';
 import { testConnection, connectToServer, updateStreamMetadata, buildListenerUrl } from './integration-relay.js';
 import { identifyAudio } from './audio-identify.js';
 import path from 'path';
@@ -16,8 +19,18 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = parseInt(process.env.PORT || '3001', 10);
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || '*';
 const REQUIRE_TLS = process.env.REQUIRE_TLS === 'true';
-const SESSION_SECRET = process.env.SESSION_SECRET || 'dev-secret-change-in-production';
+const DEFAULT_SESSION_SECRET = 'dev-secret-change-in-production';
+const SESSION_SECRET = process.env.SESSION_SECRET || DEFAULT_SESSION_SECRET;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin';
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+const SECURE_COOKIES = REQUIRE_TLS || IS_PRODUCTION;
+const SERVER_STARTED_AT = Date.now();
+
+// App version (read once from the repo-root VERSION file)
+let APP_VERSION = 'unknown';
+try {
+  APP_VERSION = fs.readFileSync(path.join(__dirname, '..', 'VERSION'), 'utf8').trim();
+} catch { /* VERSION file missing */ }
 
 // TURN — option A: Metered.ca dynamic credentials (recommended)
 const METERED_APP_NAME = process.env.METERED_APP_NAME || '';   // e.g. quetalcast.metered.live
@@ -28,8 +41,34 @@ const TURN_USERNAME = process.env.TURN_USERNAME || '';
 const TURN_CREDENTIAL = process.env.TURN_CREDENTIAL || '';
 
 const logger = createLogger('server');
-const rooms = new RoomManager(logger);
-const sessions = new SessionManager(SESSION_SECRET);
+const storage = new Storage(logger);
+const rooms = new RoomManager(logger, storage);
+const sessions = new SessionManager(SESSION_SECRET, storage);
+
+// Production guard: refuse to boot with dev credentials in production.
+// ADMIN_PASSWORD only matters while the users table is empty (it seeds the
+// bootstrap admin account); once real users exist it is ignored.
+if (IS_PRODUCTION) {
+  if (SESSION_SECRET === DEFAULT_SESSION_SECRET) {
+    logger.fatal('SESSION_SECRET is the dev default. Set a strong SESSION_SECRET before running in production.');
+    process.exit(1);
+  }
+  if (ADMIN_PASSWORD === 'admin' && storage.countUsers() === 0) {
+    logger.fatal('ADMIN_PASSWORD is "admin" and no users exist. Set ADMIN_PASSWORD before first production boot.');
+    process.exit(1);
+  }
+}
+
+// Bootstrap: seed the first owner account so existing logins keep working
+if (storage.countUsers() === 0) {
+  storage.createUser({
+    id: crypto.randomUUID(),
+    username: 'admin',
+    role: 'owner',
+    passwordHash: hashPassword(ADMIN_PASSWORD),
+  });
+  logger.info('Bootstrapped initial "admin" owner account from ADMIN_PASSWORD');
+}
 
 // Express setup
 const app = express();
@@ -65,29 +104,57 @@ if (REQUIRE_TLS) {
 
 // Rate limiting
 const loginLimiter = rateLimit({ windowMs: 60000, max: 10, message: { error: 'Too many login attempts' } });
+const musicLimiter = rateLimit({ windowMs: 60000, max: 30, message: { error: 'Too many music lookups' } });
 
 // Auth middleware
 function requireAuth(req, res, next) {
   const token = req.cookies.session;
-  if (!token || !sessions.validate(token)) {
+  const session = token ? sessions.validate(token) : null;
+  if (!session) {
     return res.status(401).json({ error: 'Authentication required' });
+  }
+  req.user = session;
+  next();
+}
+
+// Owner-only middleware (use after requireAuth)
+function requireOwner(req, res, next) {
+  if (!req.user || req.user.role !== 'owner') {
+    return res.status(403).json({ error: 'Owner access required' });
   }
   next();
 }
 
+// Health check (no auth) - used by Fly.io http checks and monitoring
+app.get('/health', (req, res) => {
+  let liveRooms = 0;
+  for (const [, room] of rooms.rooms) {
+    if (room.broadcaster && room.broadcaster.readyState === 1) liveRooms++;
+  }
+  res.json({
+    ok: true,
+    uptime: Math.floor((Date.now() - SERVER_STARTED_AT) / 1000),
+    rooms: rooms.rooms.size,
+    liveRooms,
+    ffmpeg: !!ffmpegPath,
+    version: APP_VERSION,
+  });
+});
+
 // Auth routes
 app.post('/api/login', loginLimiter, (req, res) => {
-  const { username, password } = req.body;
-  if (username === 'admin' && password === ADMIN_PASSWORD) {
-    const token = sessions.create(username);
+  const { username, password } = req.body || {};
+  const user = typeof username === 'string' ? storage.getUserByUsername(username.trim()) : null;
+  if (user && !user.disabled && typeof password === 'string' && verifyPassword(password, user.password_hash)) {
+    const token = sessions.create(user.id);
     res.cookie('session', token, {
       httpOnly: true,
-      secure: REQUIRE_TLS,
+      secure: SECURE_COOKIES,
       sameSite: 'strict',
       maxAge: 86400000, // 24h
     });
-    logger.info('Login successful');
-    res.json({ ok: true, username });
+    logger.info({ username: user.username }, 'Login successful');
+    res.json({ ok: true, username: user.username, role: user.role });
   } else {
     logger.warn('Login failed');
     res.status(401).json({ error: 'Invalid credentials' });
@@ -101,15 +168,140 @@ app.post('/api/logout', (req, res) => {
   res.json({ ok: true });
 });
 
-// Session check — lets the client verify if the session is still valid
+// Session check - lets the client verify if the session is still valid
 app.get('/api/session', (req, res) => {
   const token = req.cookies.session;
   const session = token ? sessions.validate(token) : null;
   if (session) {
-    res.json({ ok: true, username: session.username });
+    res.json({ ok: true, authenticated: true, username: session.username, role: session.role });
   } else {
-    res.status(401).json({ ok: false });
+    res.status(401).json({ ok: false, authenticated: false });
   }
+});
+
+// Feature capabilities for the logged-in client
+app.get('/api/capabilities', requireAuth, (req, res) => {
+  res.json({ autoIdentify: !!process.env.ACOUSTID_API_KEY });
+});
+
+// ---------------------------------------------------------------------------
+// User management (owner only) + invite flow
+// ---------------------------------------------------------------------------
+const INVITE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const USERNAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{1,31}$/;
+
+function serializeUser(u) {
+  return {
+    id: u.id,
+    username: u.username,
+    role: u.role,
+    disabled: !!u.disabled,
+    createdAt: u.created_at,
+    lastActiveAt: u.last_active_at || null,
+  };
+}
+
+function createInviteFor(userId, purpose) {
+  const token = crypto.randomBytes(24).toString('base64url');
+  storage.createInvite({ token, userId, purpose, expiresAt: Date.now() + INVITE_TTL_MS });
+  return { inviteToken: token, inviteUrl: `/join/${token}` };
+}
+
+app.get('/api/users', requireAuth, requireOwner, (req, res) => {
+  res.json({ users: storage.listUsers().map(serializeUser) });
+});
+
+app.post('/api/users', requireAuth, requireOwner, (req, res) => {
+  const { username, role } = req.body || {};
+  const name = typeof username === 'string' ? username.trim() : '';
+  if (!USERNAME_RE.test(name)) {
+    return res.status(400).json({ error: 'Invalid username (2-32 chars: letters, numbers, . _ -)' });
+  }
+  if (role !== 'owner' && role !== 'dj') {
+    return res.status(400).json({ error: 'Role must be "owner" or "dj"' });
+  }
+  if (storage.getUserByUsername(name)) {
+    return res.status(409).json({ error: 'Username already exists' });
+  }
+  const id = crypto.randomUUID();
+  storage.createUser({ id, username: name, role });
+  const invite = createInviteFor(id, 'invite');
+  logger.info({ username: name, role }, 'User created');
+  res.json({ id, ...invite });
+});
+
+app.post('/api/users/:id/reset', requireAuth, requireOwner, (req, res) => {
+  const user = storage.getUserById(req.params.id);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  const invite = createInviteFor(user.id, 'reset');
+  storage.revokeUserSessions(user.id);
+  logger.info({ username: user.username }, 'Password reset invite issued');
+  res.json({ ok: true, ...invite });
+});
+
+app.patch('/api/users/:id', requireAuth, requireOwner, (req, res) => {
+  const user = storage.getUserById(req.params.id);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  const { disabled } = req.body || {};
+  if (typeof disabled !== 'boolean') {
+    return res.status(400).json({ error: 'Expected { disabled: boolean }' });
+  }
+  if (disabled) {
+    if (user.id === req.user.userId) {
+      return res.status(400).json({ error: 'You cannot disable your own account' });
+    }
+    if (user.role === 'owner' && !user.disabled && storage.countEnabledOwners() <= 1) {
+      return res.status(400).json({ error: 'Cannot disable the last enabled owner' });
+    }
+  }
+  storage.setUserDisabled(user.id, disabled);
+  if (disabled) storage.revokeUserSessions(user.id);
+  logger.info({ username: user.username, disabled }, 'User disabled flag updated');
+  res.json({ ok: true, user: serializeUser(storage.getUserById(user.id)) });
+});
+
+app.delete('/api/users/:id', requireAuth, requireOwner, (req, res) => {
+  const user = storage.getUserById(req.params.id);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  if (user.id === req.user.userId) {
+    return res.status(400).json({ error: 'You cannot delete your own account' });
+  }
+  if (user.role === 'owner' && !user.disabled && storage.countEnabledOwners() <= 1) {
+    return res.status(400).json({ error: 'Cannot delete the last enabled owner' });
+  }
+  storage.deleteUser(user.id);
+  logger.info({ username: user.username }, 'User deleted');
+  res.json({ ok: true });
+});
+
+/** Look up an invite token. Returns the invite row + user, or null if invalid. */
+function resolveInvite(token) {
+  if (!token || typeof token !== 'string' || token.length > 128) return null;
+  const invite = storage.getInvite(token);
+  if (!invite || invite.used_at || invite.expires_at <= Date.now()) return null;
+  const user = storage.getUserById(invite.user_id);
+  if (!user || user.disabled) return null;
+  return { invite, user };
+}
+
+// Invite flow (no auth) - lets an invited user set their password
+app.get('/api/invite/:token', (req, res) => {
+  const resolved = resolveInvite(req.params.token);
+  if (!resolved) return res.json({ valid: false });
+  res.json({ valid: true, username: resolved.user.username, purpose: resolved.invite.purpose });
+});
+
+app.post('/api/invite/:token', loginLimiter, (req, res) => {
+  const resolved = resolveInvite(req.params.token);
+  if (!resolved) return res.status(400).json({ error: 'Invalid or expired invite' });
+  const { password } = req.body || {};
+  if (typeof password !== 'string' || password.length < 8) {
+    return res.status(400).json({ error: 'Password must be at least 8 characters' });
+  }
+  storage.setUserPassword(resolved.user.id, hashPassword(password));
+  storage.markInviteUsed(resolved.invite.token);
+  logger.info({ username: resolved.user.username, purpose: resolved.invite.purpose }, 'Invite completed - password set');
+  res.json({ ok: true });
 });
 
 // ICE server configuration — returns STUN + TURN servers for WebRTC
@@ -463,9 +655,95 @@ app.get('/stream/:roomId', (req, res) => {
   res.on('error', cleanupListener);
 });
 
-// Fix #1: Admin routes — require authentication
+// ---------------------------------------------------------------------------
+// Admin API - room overview, force-end, analytics
+// ---------------------------------------------------------------------------
 app.get('/admin/rooms', requireAuth, (req, res) => {
-  res.json({ rooms: rooms.listRooms() });
+  const now = Date.now();
+  let liveRooms = 0;
+  let listenersNow = 0;
+  const roomList = [];
+
+  for (const [roomId, room] of rooms.rooms) {
+    const broadcasterConnected = !!(room.broadcaster && room.broadcaster.readyState === 1);
+    const live = !room.endedAt;
+    const receiverCount = rooms.getReceiverIds(roomId).length;
+    const relayListenerCount = room.relayListeners.size;
+    if (broadcasterConnected) liveRooms++;
+    listenersNow += receiverCount + relayListenerCount;
+
+    const createdMs = Date.parse(room.createdAt) || now;
+    const endedMs = room.endedAt ? (Date.parse(room.endedAt) || now) : null;
+    roomList.push({
+      id: roomId,
+      title: room.streamTitle || null,
+      createdAt: room.createdAt,
+      endedAt: room.endedAt || null,
+      live,
+      broadcasterConnected,
+      receiverCount,
+      relayListenerCount,
+      peakListeners: room.peakListeners || 0,
+      durationSec: Math.max(0, Math.floor(((endedMs ?? now) - createdMs) / 1000)),
+    });
+  }
+
+  const midnight = new Date();
+  midnight.setHours(0, 0, 0, 0);
+
+  res.json({
+    stats: {
+      liveRooms,
+      listenersNow,
+      peakToday: storage.getPeakListenersSince(midnight.getTime()),
+      uptimeSec: Math.floor((now - SERVER_STARTED_AT) / 1000),
+    },
+    rooms: roomList,
+  });
+});
+
+// Force-end a live room (owner only): closes all sockets politely and marks it ended
+app.delete('/admin/rooms/:id', requireAuth, requireOwner, (req, res) => {
+  const roomId = req.params.id;
+  const room = rooms.rooms.get(roomId);
+  if (!room) return res.status(404).json({ error: 'Room not found' });
+
+  // Tear down relay resources first so the broadcaster's close handler
+  // doesn't start the silence keepalive for a room we're force-ending.
+  stopRoomTranscoder(room);
+  stopSilenceKeepalive(room);
+  room.relayHeader = null;
+  for (const writer of room.relayListeners) {
+    try { writer.end(); } catch { /* ignore */ }
+  }
+  room.relayListeners.clear();
+
+  const endedMsg = JSON.stringify({ type: 'room-ended', reason: 'Ended by admin' });
+  const receiverIds = rooms.getReceiverIds(roomId);
+  for (const rid of receiverIds) {
+    const rws = rooms.getReceiver(roomId, rid);
+    if (rws) {
+      try { rws.send(endedMsg); rws.close(1000, 'Room ended by admin'); } catch { /* ignore */ }
+    }
+  }
+
+  if (room.broadcaster && room.broadcaster.readyState === 1) {
+    try { room.broadcaster.send(endedMsg); room.broadcaster.close(1000, 'Room ended by admin'); } catch { /* ignore */ }
+  }
+
+  if (!room.endedAt) {
+    room.endedAt = new Date().toISOString();
+    try { storage.endRoom(roomId, Date.now()); } catch { /* non-fatal */ }
+  }
+
+  logger.info({ roomId: roomId.slice(0, 8), by: req.user.username }, 'Room force-ended by admin');
+  res.json({ ok: true });
+});
+
+// Listener count samples for a room (last 24h)
+app.get('/admin/rooms/:id/analytics', requireAuth, (req, res) => {
+  const samples = storage.getListenerSamples(req.params.id, Date.now() - 24 * 60 * 60 * 1000);
+  res.json({ samples: samples.map((s) => ({ ts: s.ts, count: s.count })) });
 });
 
 // Room slug history — saved custom room IDs with live status
@@ -509,7 +787,7 @@ app.post('/api/integration-test', requireAuth, integrationTestLimiter, async (re
 });
 
 // Deezer search proxy — avoids CORS issues with the Deezer API
-app.get('/api/music-search', async (req, res) => {
+app.get('/api/music-search', musicLimiter, async (req, res) => {
   const query = req.query.q;
   if (!query || typeof query !== 'string' || query.length < 2) {
     return res.json({ data: [] });
@@ -535,7 +813,7 @@ app.get('/api/music-search', async (req, res) => {
 });
 
 // Deezer track detail proxy — fetches full metadata for a selected track
-app.get('/api/music-detail/:id', async (req, res) => {
+app.get('/api/music-detail/:id', musicLimiter, async (req, res) => {
   const trackId = req.params.id;
   if (!trackId || !/^\d+$/.test(trackId)) {
     return res.json({ data: null });
@@ -814,7 +1092,7 @@ wss.on('connection', (ws, req) => {
           break;
         }
         const customId = typeof msg.customId === 'string' ? msg.customId.toLowerCase().trim() : undefined;
-        const createResult = rooms.create(customId || undefined);
+        const createResult = rooms.create(customId || undefined, sessionData?.userId);
         if (!createResult.ok) {
           ws.send(JSON.stringify({ type: 'error', message: createResult.error, code: createResult.code }));
           break;
@@ -822,8 +1100,11 @@ wss.on('connection', (ws, req) => {
         const roomId = createResult.roomId;
         const room = rooms.rooms.get(roomId);
         if (room) {
-          if (typeof msg.streamTitle === 'string') room.streamTitle = msg.streamTitle.slice(0, 100);
-          if (typeof msg.streamDescription === 'string') room.streamDescription = msg.streamDescription.slice(0, 200);
+          rooms.setStreamInfo(
+            roomId,
+            typeof msg.streamTitle === 'string' ? msg.streamTitle.slice(0, 100) : undefined,
+            typeof msg.streamDescription === 'string' ? msg.streamDescription.slice(0, 200) : undefined
+          );
         }
         clientRoom = roomId;
         clientRole = 'broadcaster';
@@ -923,7 +1204,7 @@ wss.on('connection', (ws, req) => {
           const joinRoom = rooms.rooms.get(roomId);
           if (joinRoom) {
             stopSilenceKeepalive(joinRoom);
-            joinRoom.endedAt = null;
+            rooms.reopen(roomId);
           }
           ws.send(JSON.stringify({ type: 'joined', roomId, role }));
           const receiverIds = rooms.getReceiverIds(roomId);
@@ -1324,7 +1605,86 @@ integrationWss.on('connection', (ws, req) => {
   let firstAudioChunkReceived = false;
   let firstAudioChunkTimeout = null;
 
+  // Auto-reconnect state: when the external server drops mid-stream we retry
+  // with exponential backoff instead of tearing down the client WebSocket.
+  const RECONNECT_MAX_ATTEMPTS = 10;
+  const RECONNECT_BASE_DELAY_MS = 1000;
+  const RECONNECT_MAX_DELAY_MS = 30000;
+  let connConfig = null; // { type, credentials, streamQuality }
+  let reconnectAttempt = 0;
+  let reconnectTimer = null;
+  let shuttingDown = false;
+
   logger.info({ ip }, 'Integration stream WebSocket connected');
+
+  const sendJson = (obj) => {
+    if (ws.readyState === ws.OPEN) {
+      try { ws.send(JSON.stringify(obj)); } catch { /* ignore */ }
+    }
+  };
+
+  /** Wire loss detection onto a connected source socket */
+  const attachSourceSocket = (socket) => {
+    sourceSocket = socket;
+    let lost = false;
+    const onLoss = (err) => {
+      if (lost) return; // error + close can both fire
+      lost = true;
+      if (socket !== sourceSocket) return; // stale socket from a previous attempt
+      sourceSocket = null;
+      try { socket.destroy(); } catch { /* ignore */ }
+      if (shuttingDown || ws.readyState !== ws.OPEN) return;
+      logger.warn({ error: err?.message }, 'Integration source socket lost - scheduling reconnect');
+      scheduleReconnect();
+    };
+    socket.on('error', onLoss);
+    socket.on('close', () => onLoss());
+  };
+
+  /** Schedule the next reconnect attempt with exponential backoff */
+  const scheduleReconnect = () => {
+    if (shuttingDown || reconnectTimer) return;
+    reconnectAttempt++;
+    if (reconnectAttempt > RECONNECT_MAX_ATTEMPTS) {
+      logger.error({ attempts: RECONNECT_MAX_ATTEMPTS }, 'Integration reconnect gave up');
+      sendJson({ type: 'status', state: 'failed', attempt: RECONNECT_MAX_ATTEMPTS });
+      sendJson({ type: 'error', error: 'Stream server disconnected and reconnect failed' });
+      ws.close();
+      return;
+    }
+    const delay = Math.min(RECONNECT_BASE_DELAY_MS * 2 ** (reconnectAttempt - 1), RECONNECT_MAX_DELAY_MS);
+    sendJson({ type: 'status', state: 'reconnecting', attempt: reconnectAttempt });
+    logger.info({ attempt: reconnectAttempt, delay }, 'Integration reconnect scheduled');
+    reconnectTimer = setTimeout(async () => {
+      reconnectTimer = null;
+      if (shuttingDown || ws.readyState !== ws.OPEN || !connConfig) return;
+      try {
+        const socket = await connectToServer(connConfig.type, connConfig.credentials, logger, connConfig.streamQuality);
+        attachSourceSocket(socket);
+        reconnectAttempt = 0;
+        sendJson({ type: 'status', state: 'connected', attempt: 0 });
+        logger.info({ type: connConfig.type }, 'Integration stream reconnected');
+        // Re-push current now-playing metadata to the external server
+        if (integrationRoomId) {
+          const meta = rooms.getMetadata(integrationRoomId);
+          if (meta?.text) {
+            updateStreamMetadata(connConfig.type, connConfig.credentials, meta.text, logger);
+          }
+        }
+      } catch (err) {
+        // Wrong credentials will never succeed - hard failure, no retry
+        if (/authentication failed/i.test(err.message)) {
+          logger.error({ error: err.message }, 'Integration reconnect: auth failure, giving up');
+          sendJson({ type: 'status', state: 'failed', attempt: reconnectAttempt });
+          sendJson({ type: 'error', error: err.message });
+          ws.close();
+          return;
+        }
+        logger.warn({ attempt: reconnectAttempt, error: err.message }, 'Integration reconnect attempt failed');
+        scheduleReconnect();
+      }
+    }, delay);
+  };
 
   ws.on('message', async (raw, isBinary) => {
     // First message should be JSON with integration config
@@ -1342,21 +1702,9 @@ integrationWss.on('connection', (ws, req) => {
         logger.info({ type, ip, bitrate: streamQuality?.bitrate, channels: streamQuality?.channels }, 'Integration stream: connecting to server');
 
         try {
-          sourceSocket = await connectToServer(type, credentials, logger, streamQuality);
-
-          // Handle source socket errors/close
-          sourceSocket.on('error', (err) => {
-            logger.error({ error: err.message }, 'Integration source socket error');
-            ws.send(JSON.stringify({ type: 'error', error: `Stream error: ${err.message}` }));
-            ws.close();
-          });
-          sourceSocket.on('close', () => {
-            logger.info('Integration source socket closed');
-            if (ws.readyState === ws.OPEN) {
-              ws.send(JSON.stringify({ type: 'error', error: 'Stream server disconnected' }));
-              ws.close();
-            }
-          });
+          const socket = await connectToServer(type, credentials, logger, streamQuality);
+          connConfig = { type, credentials, streamQuality };
+          attachSourceSocket(socket);
 
           initialized = true;
           firstAudioChunkReceived = false;
@@ -1421,6 +1769,11 @@ integrationWss.on('connection', (ws, req) => {
   });
 
   ws.on('close', () => {
+    shuttingDown = true;
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
     if (firstAudioChunkTimeout) {
       clearTimeout(firstAudioChunkTimeout);
       firstAudioChunkTimeout = null;
@@ -1437,6 +1790,11 @@ integrationWss.on('connection', (ws, req) => {
 
   ws.on('error', (err) => {
     logger.error({ ip, error: err.message }, 'Integration stream WebSocket error');
+    shuttingDown = true;
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
     if (firstAudioChunkTimeout) {
       clearTimeout(firstAudioChunkTimeout);
       firstAudioChunkTimeout = null;
@@ -1476,6 +1834,7 @@ function gracefulShutdown(signal) {
 
   server.close(() => {
     logger.info('HTTP server closed');
+    storage.close();
     process.exit(0);
   });
 

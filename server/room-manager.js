@@ -1,65 +1,131 @@
 import crypto from 'crypto';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
 import { createStatsLogger } from './logger.js';
 
 const MAX_RECEIVERS = 4;
 const ROOM_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const SLUGS_FILE = path.join(__dirname, '..', 'data', 'room-slugs.json');
+const LISTENER_SAMPLE_INTERVAL_MS = 60 * 1000; // sample listener counts every 60s
 
 export class RoomManager {
-  constructor(logger) {
+  constructor(logger, storage) {
     this.rooms = new Map();
     this.logger = logger;
+    this.storage = storage;
     this.statsLogger = createStatsLogger();
     this.slugHistory = this._loadSlugHistory();
     this.cleanupInterval = setInterval(() => this.cleanupExpiredRooms(), 15 * 60 * 1000); // every 15 min
+    this.sampleInterval = setInterval(() => this.sampleListenerCounts(), LISTENER_SAMPLE_INTERVAL_MS);
+    this._restoreRecentRooms();
   }
 
   _loadSlugHistory() {
+    if (!this.storage) return [];
     try {
-      const raw = fs.readFileSync(SLUGS_FILE, 'utf8');
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        return parsed
-          .filter((e) => e && typeof e.slug === 'string')
-          .map((e) => ({ slug: e.slug, lastUsed: e.lastUsed || new Date().toISOString() }));
-      }
-    } catch {
-      // File doesn't exist or is corrupt — start fresh
+      return this.storage.listSlugs().map((row) => ({
+        slug: row.slug,
+        lastUsed: new Date(row.last_used_at).toISOString(),
+      }));
+    } catch (err) {
+      this.logger.warn({ error: err.message }, 'Failed to load slug history');
+      return [];
     }
-    return [];
   }
 
-  _saveSlugHistory() {
+  /**
+   * Reload recently-ended rooms (and their tracks/chat) from SQLite so
+   * post-broadcast history and broadcaster recovery survive restarts.
+   * Rooms that were still live when the process died are marked ended now;
+   * a rejoining broadcaster reopens them.
+   */
+  _restoreRecentRooms() {
+    if (!this.storage) return;
+    const now = Date.now();
+    let restored = 0;
     try {
-      const dir = path.dirname(SLUGS_FILE);
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(SLUGS_FILE, JSON.stringify(this.slugHistory, null, 2));
+      for (const row of this.storage.getRecentRooms(now - ROOM_TTL_MS)) {
+        if (this.rooms.has(row.id)) continue;
+        let endedAt = row.ended_at;
+        if (!endedAt) {
+          // Server died while the room was live, mark it ended as of now
+          endedAt = now;
+          this.storage.endRoom(row.id, endedAt);
+        }
+        const room = this._newRoomState(row.id);
+        room.createdAt = new Date(row.created_at).toISOString();
+        room.endedAt = new Date(endedAt).toISOString();
+        room.streamTitle = row.title || null;
+        room.streamDescription = row.description || null;
+        room.ownerUserId = row.owner_user_id || null;
+        room.peakListeners = row.peak_listeners || 0;
+        room.trackList = this.storage.getTracks(row.id, 100).map((t) => {
+          const entry = { title: t.title || '', time: new Date(t.ts).toISOString() };
+          if (t.artist) entry.artist = t.artist;
+          if (t.album) entry.album = t.album;
+          if (t.year) entry.releaseDate = t.year;
+          if (t.cover_url) { entry.cover = t.cover_url; entry.coverMedium = t.cover_url; }
+          return entry;
+        });
+        room.chatHistory = this.storage.getChat(row.id, 200).map((c) => ({
+          name: c.name,
+          text: c.text,
+          time: new Date(c.ts).toISOString(),
+          ...(c.system ? { system: true } : {}),
+        }));
+        this.rooms.set(row.id, room);
+        restored++;
+      }
     } catch (err) {
-      this.logger.warn({ error: err.message }, 'Failed to persist slug history');
+      this.logger.warn({ error: err.message }, 'Failed to restore rooms from storage');
     }
+    if (restored > 0) {
+      this.logger.info({ restored }, 'Restored recent rooms from storage');
+    }
+  }
+
+  _newRoomState(roomId) {
+    return {
+      roomId,
+      broadcaster: null,
+      receivers: new Map(),
+      metadata: null,
+      trackList: [],
+      chatHistory: [],
+      chatParticipants: new Map(),
+      integrationInfo: null,
+      relayListeners: new Set(),
+      relayHeader: null,
+      ffmpegProcess: null,
+      streamTitle: null,
+      streamDescription: null,
+      ownerUserId: null,
+      peakListeners: 0,
+      silenceInterval: null,
+      silenceTimeout: null,
+      createdAt: new Date().toISOString(),
+      endedAt: null,
+    };
   }
 
   _recordSlug(slug) {
+    const nowIso = new Date().toISOString();
     const existing = this.slugHistory.find((e) => e.slug === slug);
     if (existing) {
-      existing.lastUsed = new Date().toISOString();
+      existing.lastUsed = nowIso;
     } else {
-      this.slugHistory.unshift({ slug, lastUsed: new Date().toISOString() });
+      this.slugHistory.unshift({ slug, lastUsed: nowIso });
     }
     // Sort most-recently-used first and cap at 50
     this.slugHistory.sort((a, b) => b.lastUsed.localeCompare(a.lastUsed));
     if (this.slugHistory.length > 50) this.slugHistory.length = 50;
-    this._saveSlugHistory();
+    try { this.storage?.upsertSlug(slug, Date.now()); } catch (err) {
+      this.logger.warn({ error: err.message }, 'Failed to persist slug');
+    }
   }
 
   removeSlug(slug) {
     this.slugHistory = this.slugHistory.filter((e) => e.slug !== slug);
-    this._saveSlugHistory();
+    try { this.storage?.deleteSlug(slug); } catch (err) {
+      this.logger.warn({ error: err.message }, 'Failed to delete slug');
+    }
   }
 
   /**
@@ -72,6 +138,29 @@ export class RoomManager {
       const live = !!(room && room.broadcaster && room.broadcaster.readyState === 1);
       return { slug: e.slug, lastUsed: e.lastUsed, live };
     });
+  }
+
+  /**
+   * Sample current listener counts (WebRTC receivers + relay listeners)
+   * for every live room into listener_samples and track peaks.
+   */
+  sampleListenerCounts() {
+    if (!this.storage) return;
+    const now = Date.now();
+    for (const [roomId, room] of this.rooms) {
+      const isLive = room.broadcaster && room.broadcaster.readyState === 1;
+      if (!isLive) continue;
+      const count = this.getReceiverIds(roomId).length + room.relayListeners.size;
+      try {
+        this.storage.insertListenerSample(roomId, now, count);
+        if (count > (room.peakListeners || 0)) {
+          room.peakListeners = count;
+          this.storage.updatePeakListeners(roomId, count);
+        }
+      } catch (err) {
+        this.logger.warn({ roomId: roomId.slice(0, 8), error: err.message }, 'Listener sample failed');
+      }
+    }
   }
 
   cleanupExpiredRooms() {
@@ -97,18 +186,18 @@ export class RoomManager {
 
   /**
    * Validate a custom room slug.
-   * Allowed: lowercase letters, digits, hyphens. 3–40 chars. No leading/trailing hyphens.
+   * Allowed: lowercase letters, digits, hyphens. 3-40 chars. No leading/trailing hyphens.
    * Returns null if valid, or an error string if invalid.
    */
   static validateCustomId(id) {
     if (typeof id !== 'string') return 'Room ID must be a string';
-    if (id.length < 3 || id.length > 40) return 'Room ID must be 3–40 characters';
+    if (id.length < 3 || id.length > 40) return 'Room ID must be 3-40 characters';
     if (!/^[a-z0-9][a-z0-9-]*[a-z0-9]$/.test(id) && id.length >= 3) return 'Only lowercase letters, numbers, and hyphens allowed (no leading/trailing hyphens)';
     if (/--/.test(id)) return 'No consecutive hyphens';
     return null;
   }
 
-  create(customId) {
+  create(customId, ownerUserId) {
     // If a custom ID is provided, validate and check uniqueness
     if (customId) {
       const error = RoomManager.validateCustomId(customId);
@@ -117,9 +206,9 @@ export class RoomManager {
         const existing = this.rooms.get(customId);
         const isLive = existing.broadcaster && existing.broadcaster.readyState === 1;
         if (isLive) {
-          return { ok: false, error: 'That room is currently live — try again when it ends', code: 'ROOM_ID_TAKEN' };
+          return { ok: false, error: 'That room is currently live, try again when it ends', code: 'ROOM_ID_TAKEN' };
         }
-        // Room exists but isn't live — clean up any lingering resources and reclaim
+        // Room exists but isn't live, clean up any lingering resources and reclaim
         if (existing.silenceInterval) clearInterval(existing.silenceInterval);
         if (existing.silenceTimeout) clearTimeout(existing.silenceTimeout);
         for (const writer of existing.relayListeners) {
@@ -131,31 +220,38 @@ export class RoomManager {
     }
 
     const roomId = customId || crypto.randomBytes(4).toString('hex').slice(0, 7);
-    this.rooms.set(roomId, {
-      roomId,
-      broadcaster: null,
-      receivers: new Map(),
-      metadata: null,
-      trackList: [],
-      chatHistory: [],
-      chatParticipants: new Map(),
-      integrationInfo: null,
-      relayListeners: new Set(),
-      relayHeader: null,
-      ffmpegProcess: null,
-      streamTitle: null,
-      streamDescription: null,
-      silenceInterval: null,
-      silenceTimeout: null,
-      createdAt: new Date().toISOString(),
-      endedAt: null,
-    });
+    const room = this._newRoomState(roomId);
+    room.ownerUserId = ownerUserId || null;
+    this.rooms.set(roomId, room);
+
+    try {
+      this.storage?.createRoom({ id: roomId, createdAt: Date.now(), ownerUserId: ownerUserId || null });
+    } catch (err) {
+      this.logger.warn({ roomId: roomId.slice(0, 8), error: err.message }, 'Failed to persist room');
+    }
 
     if (customId) {
       this._recordSlug(customId);
     }
 
     return { ok: true, roomId };
+  }
+
+  /** Set the display title/description for a room (persisted) */
+  setStreamInfo(roomId, title, description) {
+    const room = this.rooms.get(roomId);
+    if (!room) return;
+    if (typeof title === 'string') room.streamTitle = title;
+    if (typeof description === 'string') room.streamDescription = description;
+    try { this.storage?.updateRoomInfo(roomId, room.streamTitle, room.streamDescription); } catch { /* non-fatal */ }
+  }
+
+  /** Clear a room's ended state when the broadcaster rejoins (persisted) */
+  reopen(roomId) {
+    const room = this.rooms.get(roomId);
+    if (!room) return;
+    room.endedAt = null;
+    try { this.storage?.reopenRoom(roomId); } catch { /* non-fatal */ }
   }
 
   join(roomId, role, ws) {
@@ -170,18 +266,18 @@ export class RoomManager {
     }
 
     if (role === 'broadcaster') {
-      // Lock broadcaster slot — reject if another broadcaster is already live
+      // Lock broadcaster slot, reject if another broadcaster is already live
       if (room.broadcaster && room.broadcaster.readyState === 1) {
-        this.logger.warn({ roomId: roomId.slice(0, 8) }, 'Broadcaster join rejected — slot occupied');
+        this.logger.warn({ roomId: roomId.slice(0, 8) }, 'Broadcaster join rejected, slot occupied');
         return { ok: false, error: 'Broadcast already in progress', code: 'BROADCASTER_OCCUPIED' };
       }
       room.broadcaster = ws;
       return { ok: true };
     }
 
-    // Receiver — enforce max
+    // Receiver, enforce max
     if (room.receivers.size >= MAX_RECEIVERS) {
-      this.logger.warn({ roomId: roomId.slice(0, 8) }, 'Receiver join rejected — room full');
+      this.logger.warn({ roomId: roomId.slice(0, 8) }, 'Receiver join rejected, room full');
       return { ok: false, error: 'Room is full', code: 'ROOM_FULL' };
     }
 
@@ -197,7 +293,8 @@ export class RoomManager {
     if (role === 'broadcaster') {
       room.broadcaster = null;
       room.endedAt = new Date().toISOString();
-      this.logger.info({ roomId: roomId.slice(0, 8) }, 'Broadcast ended — room kept for 24h');
+      try { this.storage?.endRoom(roomId, Date.now()); } catch { /* non-fatal */ }
+      this.logger.info({ roomId: roomId.slice(0, 8) }, 'Broadcast ended, room kept for 24h');
     } else if (role === 'receiver' && receiverId) {
       room.receivers.delete(receiverId);
     }
@@ -207,6 +304,7 @@ export class RoomManager {
     const hasContent = (room.trackList?.length || 0) > 0 || (room.chatHistory?.length || 0) > 0;
     if (!room.broadcaster && room.receivers.size === 0 && !room.endedAt && !hasContent) {
       this.rooms.delete(roomId);
+      try { this.storage?.deleteRoom(roomId); } catch { /* non-fatal */ }
       this.logger.info({ roomId: roomId.slice(0, 8) }, 'Room destroyed (empty, unused)');
     }
   }
@@ -259,7 +357,7 @@ export class RoomManager {
   /**
    * Add a track entry with rich metadata.
    * @param {string} roomId
-   * @param {object} meta — { text, cover, coverMedium, artist, title, album, duration,
+   * @param {object} meta, { text, cover, coverMedium, artist, title, album, duration,
    *   releaseDate, isrc, bpm, trackPosition, diskNumber, explicitLyrics,
    *   contributors, label, genres }
    */
@@ -287,6 +385,21 @@ export class RoomManager {
     room.trackList.unshift(entry); // newest first
     // Cap at 100 tracks
     if (room.trackList.length > 100) room.trackList.length = 100;
+
+    try {
+      const yearMatch = typeof meta.releaseDate === 'string' ? meta.releaseDate.match(/^(\d{4})/) : null;
+      this.storage?.insertTrack(roomId, {
+        ts: Date.now(),
+        title: meta.text,
+        artist: meta.artist,
+        album: meta.album,
+        year: yearMatch ? yearMatch[1] : null,
+        coverUrl: meta.coverMedium || meta.cover || null,
+        source: meta.source || 'live',
+      });
+    } catch (err) {
+      this.logger.warn({ roomId: roomId.slice(0, 8), error: err.message }, 'Failed to persist track');
+    }
   }
 
   getTrackList(roomId) {
@@ -297,7 +410,7 @@ export class RoomManager {
   /**
    * Add a chat message to the room history.
    * @param {string} roomId
-   * @param {object} msg — { name, text, system? }
+   * @param {object} msg, { name, text, system? }
    */
   addChat(roomId, msg) {
     const room = this.rooms.get(roomId);
@@ -311,6 +424,12 @@ export class RoomManager {
     // Cap at 200 messages
     if (room.chatHistory.length > 200) {
       room.chatHistory = room.chatHistory.slice(-200);
+    }
+
+    try {
+      this.storage?.insertChat(roomId, { ts: Date.now(), name: msg.name, text: msg.text, system: !!msg.system });
+    } catch (err) {
+      this.logger.warn({ roomId: roomId.slice(0, 8), error: err.message }, 'Failed to persist chat message');
     }
   }
 
