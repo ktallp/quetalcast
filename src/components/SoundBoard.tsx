@@ -8,6 +8,7 @@ import {
   DialogDescription,
 } from '@/components/ui/dialog';
 import { Slider } from '@/components/ui/slider';
+import { ConfirmDialog } from '@/components/ConfirmDialog';
 
 interface PadState {
   file: File | null;
@@ -15,7 +16,7 @@ interface PadState {
   objectUrl: string | null;
   dataUrl: string | null;
   title: string;
-  volume: number; // 0–300
+  volume: number; // 0-300
   gainNode: GainNode | null;
   loop: boolean;
   isPlaying: boolean;
@@ -34,13 +35,28 @@ const EMPTY_PAD: PadState = {
 };
 
 const PAD_COUNT = 10;
+const BANK_COUNT = 3;
+const BANK_LABELS = ['A', 'B', 'C'];
 const SOUNDBOARD_STORAGE_KEY = 'quetalcast:soundboard:v1';
+const PAD_KEYCAPS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'];
 
 interface StoredPad {
   title: string;
   volume: number;
   loop: boolean;
   dataUrl: string | null;
+}
+
+interface StoredBoard {
+  version: 2;
+  activeBank: number;
+  banks: StoredPad[][];
+}
+
+function emptyBanks(): PadState[][] {
+  return Array.from({ length: BANK_COUNT }, () =>
+    Array.from({ length: PAD_COUNT }, () => ({ ...EMPTY_PAD })),
+  );
 }
 
 function fileToDataUrl(file: File): Promise<string> {
@@ -54,89 +70,148 @@ function fileToDataUrl(file: File): Promise<string> {
 
 interface SoundBoardProps {
   connectElement: (audio: HTMLAudioElement) => GainNode | null;
-  /** Ref that receives a triggerPad function for keyboard shortcuts */
+  /** Ref that receives a triggerPad function for keyboard shortcuts (active bank) */
   triggerRef?: React.MutableRefObject<((index: number) => void) | null>;
   /** Called when a pad starts or stops playing */
   onPadPlayback?: (padTitle: string, playing: boolean) => void;
 }
 
 export function SoundBoard({ connectElement, triggerRef, onPadPlayback }: SoundBoardProps) {
-  const [pads, setPads] = useState<PadState[]>(() =>
-    Array.from({ length: PAD_COUNT }, () => ({ ...EMPTY_PAD })),
-  );
+  const [banks, setBanks] = useState<PadState[][]>(emptyBanks);
+  const [activeBank, setActiveBank] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const activePadRef = useRef<number | null>(null);
+  const dragIndexRef = useRef<number | null>(null);
+  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
+  const [progress, setProgress] = useState<Record<string, number>>({});
 
   // Edit modal state
   const [editIndex, setEditIndex] = useState<number | null>(null);
   const [editTitle, setEditTitle] = useState('');
   const [editVolume, setEditVolume] = useState(100);
+  const [removeIndex, setRemoveIndex] = useState<number | null>(null);
 
-  const updatePad = useCallback((index: number, update: Partial<PadState>) => {
-    setPads((prev) => prev.map((p, i) => (i === index ? { ...p, ...update } : p)));
+  const pads = banks[activeBank];
+
+  const updatePad = useCallback((bank: number, index: number, update: Partial<PadState>) => {
+    setBanks((prev) =>
+      prev.map((b, bi) => (bi === bank ? b.map((p, i) => (i === index ? { ...p, ...update } : p)) : b)),
+    );
   }, []);
+
+  /** Build a live pad from a stored one (audio element + mixer connection) */
+  const hydratePad = useCallback(
+    (stored: StoredPad, bank: number, index: number): PadState => {
+      if (!stored?.dataUrl) return { ...EMPTY_PAD };
+      const audio = new Audio(stored.dataUrl);
+      audio.loop = Boolean(stored.loop);
+      audio.volume = 1;
+      const gainNode = connectElement(audio);
+      if (gainNode) gainNode.gain.value = (stored.volume ?? 100) / 100;
+      audio.addEventListener('ended', () => {
+        setBanks((prev) =>
+          prev.map((b, bi) => (bi === bank ? b.map((p, i) => (i === index ? { ...p, isPlaying: false } : p)) : b)),
+        );
+      });
+      return {
+        file: null,
+        audioEl: audio,
+        objectUrl: null,
+        dataUrl: stored.dataUrl,
+        title: stored.title || `Pad ${index + 1}`,
+        volume: typeof stored.volume === 'number' ? stored.volume : 100,
+        gainNode,
+        loop: Boolean(stored.loop),
+        isPlaying: false,
+      };
+    },
+    [connectElement],
+  );
 
   useEffect(() => {
     let cancelled = false;
-    const bootstrap = async () => {
+    const bootstrap = () => {
       try {
         const raw = localStorage.getItem(SOUNDBOARD_STORAGE_KEY);
         if (!raw) return;
-        const parsed = JSON.parse(raw) as StoredPad[] | null;
-        if (!Array.isArray(parsed)) return;
+        const parsed = JSON.parse(raw) as StoredBoard | StoredPad[] | null;
+        if (!parsed) return;
 
-        const nextPads = await Promise.all(
-          Array.from({ length: PAD_COUNT }, async (_, index): Promise<PadState> => {
-            const stored = parsed[index];
-            if (!stored?.dataUrl) return { ...EMPTY_PAD };
+        // v1 payloads were a flat array of pads: migrate into bank A
+        const storedBanks: StoredPad[][] = Array.isArray(parsed)
+          ? [parsed, [], []]
+          : Array.isArray((parsed as StoredBoard).banks)
+            ? (parsed as StoredBoard).banks
+            : [];
+        if (storedBanks.length === 0) return;
 
-            const audio = new Audio(stored.dataUrl);
-            audio.loop = Boolean(stored.loop);
-            audio.volume = 1;
-            const gainNode = connectElement(audio);
-            if (gainNode) gainNode.gain.value = (stored.volume ?? 100) / 100;
-            audio.addEventListener('ended', () => {
-              setPads((prev) => prev.map((p, i) => (i === index ? { ...p, isPlaying: false } : p)));
-            });
-
-            return {
-              file: null,
-              audioEl: audio,
-              objectUrl: null,
-              dataUrl: stored.dataUrl,
-              title: stored.title || `Pad ${index + 1}`,
-              volume: typeof stored.volume === 'number' ? stored.volume : 100,
-              gainNode,
-              loop: Boolean(stored.loop),
-              isPlaying: false,
-            };
+        const nextBanks = Array.from({ length: BANK_COUNT }, (_, bank) =>
+          Array.from({ length: PAD_COUNT }, (_, index) => {
+            const stored = storedBanks[bank]?.[index];
+            return stored?.dataUrl ? hydratePad(stored, bank, index) : { ...EMPTY_PAD };
           }),
         );
 
-        if (!cancelled) setPads(nextPads);
+        if (!cancelled) {
+          setBanks(nextBanks);
+          if (!Array.isArray(parsed) && typeof (parsed as StoredBoard).activeBank === 'number') {
+            const b = (parsed as StoredBoard).activeBank;
+            if (b >= 0 && b < BANK_COUNT) setActiveBank(b);
+          }
+        }
       } catch {
         // Ignore invalid persisted payloads
       }
     };
-    void bootstrap();
+    bootstrap();
     return () => {
       cancelled = true;
     };
-  }, [connectElement]);
+  }, [hydratePad]);
 
   useEffect(() => {
-    const serializable: StoredPad[] = pads.map((p) => ({
-      title: p.title,
-      volume: p.volume,
-      loop: p.loop,
-      dataUrl: p.dataUrl,
-    }));
+    const payload: StoredBoard = {
+      version: 2,
+      activeBank,
+      banks: banks.map((bank) =>
+        bank.map((p) => ({
+          title: p.title,
+          volume: p.volume,
+          loop: p.loop,
+          dataUrl: p.dataUrl,
+        })),
+      ),
+    };
     try {
-      localStorage.setItem(SOUNDBOARD_STORAGE_KEY, JSON.stringify(serializable));
+      localStorage.setItem(SOUNDBOARD_STORAGE_KEY, JSON.stringify(payload));
     } catch {
       // Most likely quota exceeded; keep runtime state functional.
     }
-  }, [pads]);
+  }, [banks, activeBank]);
+
+  // Progress rings for playing pads
+  useEffect(() => {
+    const anyPlaying = banks.some((bank) => bank.some((p) => p.isPlaying));
+    if (!anyPlaying) {
+      setProgress({});
+      return;
+    }
+    let raf = 0;
+    const tick = () => {
+      const next: Record<string, number> = {};
+      banks.forEach((bank, bi) => {
+        bank.forEach((p, pi) => {
+          if (p.isPlaying && p.audioEl && p.audioEl.duration > 0) {
+            next[`${bi}-${pi}`] = (p.audioEl.currentTime % p.audioEl.duration) / p.audioEl.duration;
+          }
+        });
+      });
+      setProgress(next);
+      raf = window.requestAnimationFrame(tick);
+    };
+    raf = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(raf);
+  }, [banks]);
 
   const handleLoadFile = (index: number) => {
     activePadRef.current = index;
@@ -148,8 +223,8 @@ export function SoundBoard({ connectElement, triggerRef, onPadPlayback }: SoundB
     const index = activePadRef.current;
     if (!file || index === null) return;
 
-    // Clean up previous pad if it had a file
-    const prev = pads[index];
+    const bank = activeBank;
+    const prev = banks[bank][index];
     if (prev.audioEl) {
       prev.audioEl.pause();
       prev.audioEl.src = '';
@@ -167,19 +242,16 @@ export function SoundBoard({ connectElement, triggerRef, onPadPlayback }: SoundB
       dataUrl = null;
     }
 
-    // Connect to the mixer so it routes to broadcast + local speakers
     const gainNode = connectElement(audio);
-
-    // Audio element volume stays at 1; gain node handles amplification (0–3x)
     audio.volume = 1;
 
     audio.addEventListener('ended', () => {
-      updatePad(index, { isPlaying: false });
+      updatePad(bank, index, { isPlaying: false });
     });
 
     const defaultTitle = file.name.replace(/\.[^.]+$/, '');
 
-    updatePad(index, {
+    updatePad(bank, index, {
       file,
       audioEl: audio,
       objectUrl,
@@ -191,29 +263,28 @@ export function SoundBoard({ connectElement, triggerRef, onPadPlayback }: SoundB
       isPlaying: false,
     });
 
-    // Reset file input so the same file can be re-selected
     e.target.value = '';
     activePadRef.current = null;
   };
 
-  const handlePlayStop = (index: number) => {
-    const pad = pads[index];
-    if (!pad.audioEl) return;
+  const handlePlayStop = useCallback((index: number) => {
+    const pad = banks[activeBank][index];
+    if (!pad?.audioEl) return;
 
     if (pad.isPlaying) {
       pad.audioEl.pause();
       pad.audioEl.currentTime = 0;
-      updatePad(index, { isPlaying: false });
+      updatePad(activeBank, index, { isPlaying: false });
       onPadPlayback?.(pad.title, false);
     } else {
       pad.audioEl.currentTime = 0;
       pad.audioEl.play().catch(() => {
-        // Autoplay blocked — ignore
+        // Autoplay blocked; ignore
       });
-      updatePad(index, { isPlaying: true });
+      updatePad(activeBank, index, { isPlaying: true });
       onPadPlayback?.(pad.title, true);
     }
-  };
+  }, [banks, activeBank, updatePad, onPadPlayback]);
 
   const handleToggleLoop = (index: number, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -222,11 +293,10 @@ export function SoundBoard({ connectElement, triggerRef, onPadPlayback }: SoundB
     if (pad.audioEl) {
       pad.audioEl.loop = newLoop;
     }
-    updatePad(index, { loop: newLoop });
+    updatePad(activeBank, index, { loop: newLoop });
   };
 
-  const handleRemove = (index: number, e: React.MouseEvent) => {
-    e.stopPropagation();
+  const handleRemove = (index: number) => {
     const pad = pads[index];
     if (pad.audioEl) {
       pad.audioEl.pause();
@@ -235,7 +305,9 @@ export function SoundBoard({ connectElement, triggerRef, onPadPlayback }: SoundB
     if (pad.objectUrl) {
       URL.revokeObjectURL(pad.objectUrl);
     }
-    setPads((prev) => prev.map((p, i) => (i === index ? { ...EMPTY_PAD } : p)));
+    setBanks((prev) =>
+      prev.map((b, bi) => (bi === activeBank ? b.map((p, i) => (i === index ? { ...EMPTY_PAD } : p)) : b)),
+    );
   };
 
   const openEditModal = (index: number, e: React.MouseEvent) => {
@@ -250,13 +322,26 @@ export function SoundBoard({ connectElement, triggerRef, onPadPlayback }: SoundB
     if (editIndex === null) return;
     const pad = pads[editIndex];
     if (pad.gainNode) {
-      pad.gainNode.gain.value = editVolume / 100; // 0–3.0
+      pad.gainNode.gain.value = editVolume / 100; // 0-3.0
     }
-    updatePad(editIndex, { title: editTitle, volume: editVolume });
+    updatePad(activeBank, editIndex, { title: editTitle, volume: editVolume });
     setEditIndex(null);
   };
 
-  // Expose triggerPad for keyboard shortcuts
+  const handleReorder = (from: number, to: number) => {
+    if (from === to) return;
+    setBanks((prev) =>
+      prev.map((bank, bi) => {
+        if (bi !== activeBank) return bank;
+        const next = [...bank];
+        const [moved] = next.splice(from, 1);
+        next.splice(to, 0, moved);
+        return next;
+      }),
+    );
+  };
+
+  // Expose triggerPad for keyboard shortcuts (active bank)
   useEffect(() => {
     if (triggerRef) {
       triggerRef.current = (index: number) => {
@@ -268,83 +353,175 @@ export function SoundBoard({ connectElement, triggerRef, onPadPlayback }: SoundB
     return () => {
       if (triggerRef) triggerRef.current = null;
     };
-  }, [pads]); // re-bind when pads change so handlePlayStop captures latest state
+  }, [handlePlayStop, triggerRef]);
 
   const editPad = editIndex !== null ? pads[editIndex] : null;
+  const removePad = removeIndex !== null ? pads[removeIndex] : null;
 
   return (
     <>
-      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
-        {pads.map((pad, i) => (
-          <div key={i} className="relative aspect-square">
-            {pad.audioEl ? (
-              /* Loaded pad (from file picker or restored from localStorage) */
+      {/* Bank switcher */}
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">
+          Bank {BANK_LABELS[activeBank]}
+        </span>
+        <div className="flex rounded-md border border-border overflow-hidden" role="group" aria-label="Sound pad bank">
+          {BANK_LABELS.map((label, i) => {
+            const hasContent = banks[i].some((p) => p.audioEl);
+            return (
               <button
-                onClick={() => handlePlayStop(i)}
-                className={`w-full h-full rounded-md border flex flex-col items-center justify-between pt-[40%] pb-6 transition-all ${
-                  pad.isPlaying
-                    ? 'border-primary bg-primary/15 glow-ring'
-                    : 'border-border bg-secondary/50 hover:bg-secondary'
+                key={label}
+                onClick={() => setActiveBank(i)}
+                aria-pressed={activeBank === i}
+                aria-label={`Bank ${label}${hasContent ? '' : ' (empty)'}`}
+                className={`px-3 py-1 text-[10px] font-mono font-semibold ${
+                  activeBank === i
+                    ? 'bg-primary/20 text-primary'
+                    : hasContent
+                      ? 'bg-secondary text-foreground/80'
+                      : 'bg-secondary text-muted-foreground/50'
                 }`}
               >
-                {pad.isPlaying ? (
-                  <Square className="h-4 w-4 text-primary fill-primary" />
-                ) : (
-                  <Play className="h-4 w-4 text-muted-foreground" />
-                )}
-                <span className="text-[10px] font-mono text-muted-foreground leading-tight text-center px-1 line-clamp-2 overflow-hidden">
-                  {pad.title}
-                </span>
+                {label}
               </button>
-            ) : (
-              /* Empty pad */
-              <button
-                onClick={() => handleLoadFile(i)}
-                className="w-full h-full rounded-md border-2 border-dashed border-border/60 flex items-center justify-center hover:border-muted-foreground hover:bg-secondary/30 transition-all"
-              >
-                <Plus className="h-5 w-5 text-muted-foreground/50" />
-              </button>
-            )}
-
-            {/* Loop toggle — top-right */}
-            {pad.audioEl && (
-              <button
-                onClick={(e) => handleToggleLoop(i, e)}
-                className={`absolute top-0.5 right-0.5 p-0.5 rounded transition-colors ${
-                  pad.loop
-                    ? 'text-primary bg-primary/20'
-                    : 'text-muted-foreground/40 hover:text-muted-foreground'
-                }`}
-                title={pad.loop ? 'Loop on' : 'Loop off'}
-              >
-                <Repeat className="h-3 w-3" />
-              </button>
-            )}
-
-            {/* Remove — top-left */}
-            {pad.audioEl && !pad.isPlaying && (
-              <button
-                onClick={(e) => handleRemove(i, e)}
-                className="absolute top-0.5 left-0.5 p-0.5 rounded text-muted-foreground/40 hover:text-destructive transition-colors"
-                title="Remove"
-              >
-                <X className="h-3 w-3" />
-              </button>
-            )}
-
-            {/* Edit — bottom-right */}
-            {pad.audioEl && (
-              <button
-                onClick={(e) => openEditModal(i, e)}
-                className="absolute bottom-0.5 right-0.5 p-0.5 rounded text-muted-foreground/40 hover:text-foreground transition-colors"
-                title="Edit"
-              >
-                <Settings className="h-3 w-3" />
-              </button>
-            )}
-          </div>
-        ))}
+            );
+          })}
+        </div>
       </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+        {pads.map((pad, i) => {
+          const frac = progress[`${activeBank}-${i}`];
+          return (
+            <div
+              key={i}
+              className={`relative aspect-square ${dragOverIndex === i ? 'ring-1 ring-primary rounded-md' : ''}`}
+              draggable={Boolean(pad.audioEl)}
+              onDragStart={(e) => {
+                dragIndexRef.current = i;
+                e.dataTransfer.effectAllowed = 'move';
+              }}
+              onDragOver={(e) => {
+                if (dragIndexRef.current !== null) {
+                  e.preventDefault();
+                  setDragOverIndex(i);
+                }
+              }}
+              onDragLeave={() => setDragOverIndex((cur) => (cur === i ? null : cur))}
+              onDrop={(e) => {
+                e.preventDefault();
+                if (dragIndexRef.current !== null) {
+                  handleReorder(dragIndexRef.current, i);
+                }
+                dragIndexRef.current = null;
+                setDragOverIndex(null);
+              }}
+              onDragEnd={() => {
+                dragIndexRef.current = null;
+                setDragOverIndex(null);
+              }}
+            >
+              {pad.audioEl ? (
+                <button
+                  onClick={() => handlePlayStop(i)}
+                  aria-label={`${pad.isPlaying ? 'Stop' : 'Play'} pad ${i + 1}: ${pad.title}`}
+                  className={`w-full h-full rounded-md border flex flex-col items-center justify-between pt-[40%] pb-6 transition-all ${
+                    pad.isPlaying
+                      ? 'border-primary bg-primary/15 glow-ring'
+                      : 'border-border bg-secondary/50 hover:bg-secondary'
+                  }`}
+                >
+                  {pad.isPlaying ? (
+                    <Square className="h-4 w-4 text-primary fill-primary" aria-hidden />
+                  ) : (
+                    <Play className="h-4 w-4 text-muted-foreground" aria-hidden />
+                  )}
+                  <span className="text-[10px] font-mono text-muted-foreground leading-tight text-center px-1 line-clamp-2 overflow-hidden">
+                    {pad.title}
+                  </span>
+                </button>
+              ) : (
+                <button
+                  onClick={() => handleLoadFile(i)}
+                  aria-label={`Load a sound into pad ${i + 1}`}
+                  className="w-full h-full rounded-md border-2 border-dashed border-border/60 flex items-center justify-center hover:border-muted-foreground hover:bg-secondary/30 transition-all"
+                >
+                  <Plus className="h-5 w-5 text-muted-foreground/50" aria-hidden />
+                </button>
+              )}
+
+              {/* Keycap hint: bottom-left */}
+              <kbd
+                className="absolute bottom-0.5 left-1 text-[8px] font-mono text-muted-foreground/40 pointer-events-none"
+                aria-hidden
+              >
+                {PAD_KEYCAPS[i]}
+              </kbd>
+
+              {/* Progress ring for playing pads: top-center */}
+              {pad.isPlaying && frac !== undefined && (
+                <span
+                  className="absolute top-1 left-1/2 -translate-x-1/2 h-3.5 w-3.5 rounded-full pointer-events-none"
+                  style={{
+                    background: `conic-gradient(hsl(var(--primary)) ${frac * 360}deg, hsl(var(--secondary)) ${frac * 360}deg)`,
+                    mask: 'radial-gradient(circle, transparent 3.5px, #000 4px)',
+                    WebkitMask: 'radial-gradient(circle, transparent 3.5px, #000 4px)',
+                  }}
+                  aria-hidden
+                />
+              )}
+
+              {/* Loop toggle: top-right */}
+              {pad.audioEl && (
+                <button
+                  onClick={(e) => handleToggleLoop(i, e)}
+                  aria-label={pad.loop ? `Disable loop on pad ${i + 1}` : `Loop pad ${i + 1}`}
+                  aria-pressed={pad.loop}
+                  className={`absolute top-0.5 right-0.5 p-0.5 rounded transition-colors ${
+                    pad.loop
+                      ? 'text-primary bg-primary/20'
+                      : 'text-muted-foreground/40 hover:text-muted-foreground'
+                  }`}
+                  title={pad.loop ? 'Loop on' : 'Loop off'}
+                >
+                  <Repeat className="h-3 w-3" aria-hidden />
+                </button>
+              )}
+
+              {/* Remove: top-left */}
+              {pad.audioEl && !pad.isPlaying && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setRemoveIndex(i);
+                  }}
+                  aria-label={`Remove pad ${i + 1}: ${pad.title}`}
+                  className="absolute top-0.5 left-0.5 p-0.5 rounded text-muted-foreground/40 hover:text-destructive transition-colors"
+                  title="Remove"
+                >
+                  <X className="h-3 w-3" aria-hidden />
+                </button>
+              )}
+
+              {/* Edit: bottom-right */}
+              {pad.audioEl && (
+                <button
+                  onClick={(e) => openEditModal(i, e)}
+                  aria-label={`Edit pad ${i + 1}: ${pad.title}`}
+                  className="absolute bottom-0.5 right-0.5 p-0.5 rounded text-muted-foreground/40 hover:text-foreground transition-colors"
+                  title="Edit"
+                >
+                  <Settings className="h-3 w-3" aria-hidden />
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      <p className="mt-2 text-[10px] text-muted-foreground/50 hidden sm:block">
+        Drag pads to reorder. Keys 1-0 trigger the active bank.
+      </p>
 
       {/* Hidden file input */}
       <input
@@ -353,6 +530,21 @@ export function SoundBoard({ connectElement, triggerRef, onPadPlayback }: SoundB
         accept=".mp3,audio/*"
         onChange={handleFileChange}
         className="hidden"
+        aria-hidden
+      />
+
+      {/* Remove confirmation */}
+      <ConfirmDialog
+        open={removeIndex !== null}
+        onOpenChange={(open) => { if (!open) setRemoveIndex(null); }}
+        title="Remove this pad?"
+        description={removePad ? `"${removePad.title}" will be removed from bank ${BANK_LABELS[activeBank]}.` : undefined}
+        confirmLabel="Remove"
+        destructive
+        onConfirm={() => {
+          if (removeIndex !== null) handleRemove(removeIndex);
+          setRemoveIndex(null);
+        }}
       />
 
       {/* Edit modal */}
@@ -361,17 +553,17 @@ export function SoundBoard({ connectElement, triggerRef, onPadPlayback }: SoundB
           <DialogHeader>
             <DialogTitle>Edit Pad</DialogTitle>
             <DialogDescription className="text-xs font-mono text-muted-foreground">
-              {editPad?.file?.name}
+              {editPad?.file?.name || editPad?.title}
             </DialogDescription>
           </DialogHeader>
 
           <div className="space-y-4 pt-2">
-            {/* Title */}
             <div className="space-y-2">
-              <label className="text-xs font-mono uppercase tracking-wider text-muted-foreground">
+              <label className="text-xs font-mono uppercase tracking-wider text-muted-foreground" htmlFor="pad-title-input">
                 Title
               </label>
               <input
+                id="pad-title-input"
                 value={editTitle}
                 onChange={(e) => setEditTitle(e.target.value)}
                 className="w-full bg-input border border-border rounded-md px-3 py-2 text-sm font-mono text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
@@ -379,7 +571,6 @@ export function SoundBoard({ connectElement, triggerRef, onPadPlayback }: SoundB
               />
             </div>
 
-            {/* Volume */}
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <label className="text-xs font-mono uppercase tracking-wider text-muted-foreground">
@@ -396,6 +587,7 @@ export function SoundBoard({ connectElement, triggerRef, onPadPlayback }: SoundB
                 max={300}
                 step={1}
                 className={editVolume > 100 ? 'slider-danger' : ''}
+                aria-label="Pad volume"
               />
               {editVolume > 100 && (
                 <p className="text-[11px] font-mono text-red-500">
@@ -405,7 +597,6 @@ export function SoundBoard({ connectElement, triggerRef, onPadPlayback }: SoundB
             </div>
           </div>
 
-          {/* Save */}
           <div className="flex justify-end pt-2">
             <button
               onClick={handleEditSave}

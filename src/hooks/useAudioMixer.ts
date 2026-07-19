@@ -2,6 +2,23 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 export type LimiterThreshold = 0 | -3 | -6 | -12;
 
+export type DuckChannel = 'pads' | 'system';
+
+// ── Ducking tuning ──
+// Mic RMS above this (dBFS) counts as speech
+const DUCK_THRESHOLD_DB = -45;
+// Consecutive readings above threshold needed to engage
+const DUCK_ATTACK_READINGS = 2;
+// Continuous silence (ms) needed before releasing
+const DUCK_RELEASE_HOLD_MS = 700;
+// Detector polling interval (ms)
+const DUCK_INTERVAL_MS = 50;
+// Ducked level: -9 dB
+const DUCK_GAIN = Math.pow(10, -9 / 20);
+// setTargetAtTime time constants (seconds)
+const DUCK_ATTACK_TC = 0.05;
+const DUCK_RELEASE_TC = 0.4;
+
 export interface UseAudioMixerReturn {
   mixedStream: MediaStream | null;
   connectMic: (stream: MediaStream) => void;
@@ -24,6 +41,9 @@ export interface UseAudioMixerReturn {
   setPadsMonitor: (on: boolean) => void;
   getChannelLevels: () => { mic: number; system: number; pads: number };
   getNodes: () => { ctx: AudioContext; micGain: GainNode; broadcastBus: GainNode; micVolumeGain: GainNode; clipper: WaveShaperNode } | null;
+  ducking: { pads: boolean; system: boolean };
+  setDucking: (channel: DuckChannel, enabled: boolean) => void;
+  duckActive: boolean;
 }
 
 /**
@@ -31,9 +51,11 @@ export interface UseAudioMixerReturn {
  *
  *   micSource → micGain (mute) → [effects] → micVolumeGain (volume) → micPan → broadcastBus
  *   micPan → micMonitorGain → ctx.destination        (per-channel headphone monitor)
- *   sysAudioSource → sysAudioGain → sysAudioPan → broadcastBus
+ *   sysAudioSource → sysAudioGain → sysDuckGain → sysAudioPan → broadcastBus
  *   sysAudioPan → sysMonitorGain → ctx.destination   (per-channel headphone monitor)
- *   soundboardBus → padsVolumeGain → padsPan → sbToBroadcastGain → broadcastBus
+ *   soundboardBus → padsVolumeGain → padsDuckGain → padsPan → sbToBroadcastGain → broadcastBus
+ *   (duck gains sit after each channel's volume gain, default 1; the speech
+ *    detector ramps them to -9 dB while the mic is active and ducking is on)
  *   padsPan → sbLocalGain → ctx.destination           (per-channel headphone monitor for pads)
  *   broadcastBus → broadcastOutGain → limiter → clipper → dest (→ mixedStream → WebRTC)
  *   broadcastBus → listenGain → ctx.destination       (global listen / full-mix monitor)
@@ -76,9 +98,9 @@ export function useAudioMixer(): UseAudioMixerReturn {
   const micAnalyserRef = useRef<AnalyserNode | null>(null);
   const padsAnalyserRef = useRef<AnalyserNode | null>(null);
   const systemAnalyserRef = useRef<AnalyserNode | null>(null);
-  const micAnalyserDataRef = useRef<Uint8Array | null>(null);
-  const padsAnalyserDataRef = useRef<Uint8Array | null>(null);
-  const systemAnalyserDataRef = useRef<Uint8Array | null>(null);
+  const micAnalyserDataRef = useRef<Uint8Array<ArrayBuffer> | null>(null);
+  const padsAnalyserDataRef = useRef<Uint8Array<ArrayBuffer> | null>(null);
+  const systemAnalyserDataRef = useRef<Uint8Array<ArrayBuffer> | null>(null);
 
   // Per-channel monitor gain nodes (headphone buttons)
   const micMonitorGainRef = useRef<GainNode | null>(null);
@@ -93,8 +115,22 @@ export function useAudioMixer(): UseAudioMixerReturn {
   // Track current mic volume for mute/unmute restore
   const micVolumeRef = useRef(1);
 
+  // ── Ducking state ──
+  const padsDuckGainRef = useRef<GainNode | null>(null);
+  const sysDuckGainRef = useRef<GainNode | null>(null);
+  const duckingRef = useRef<{ pads: boolean; system: boolean }>({ pads: false, system: false });
+  const [ducking, setDuckingState] = useState<{ pads: boolean; system: boolean }>({ pads: false, system: false });
+  const duckActiveRef = useRef(false);
+  const [duckActive, setDuckActiveState] = useState(false);
+  const duckIntervalRef = useRef<number | null>(null);
+  const duckAboveCountRef = useRef(0);
+  const duckBelowMsRef = useRef(0);
+  const duckDataRef = useRef<Uint8Array<ArrayBuffer> | null>(null);
+  // Indirection so ensureContext (defined below) can kick the detector loop
+  const updateDuckLoopRef = useRef<(() => void) | null>(null);
+
   /** Build a hard-clip transfer curve that caps amplitude at the given dBFS threshold */
-  const buildClipCurve = useCallback((thresholdDb: number): Float32Array => {
+  const buildClipCurve = useCallback((thresholdDb: number): Float32Array<ArrayBuffer> => {
     const samples = 8192;
     const curve = new Float32Array(samples);
     const ceiling = thresholdDb >= 0 ? 1.0 : Math.pow(10, thresholdDb / 20);
@@ -179,6 +215,11 @@ export function useAudioMixer(): UseAudioMixerReturn {
     const micMonitorGain = ctx.createGain();
     micMonitorGain.gain.value = 0; // mic monitor off by default
 
+    // Duck gain for pads: inserted at build time (gain 1) so enabling
+    // ducking later never rewires the graph mid-broadcast
+    const padsDuckGain = ctx.createGain();
+    padsDuckGain.gain.value = 1;
+
     // Wire the graph
     // micVolumeGain → micPan → broadcastBus (mic path always goes through volume + pan)
     micVolumeGain.connect(micPan);
@@ -188,9 +229,10 @@ export function useAudioMixer(): UseAudioMixerReturn {
     micPan.connect(micMonitorGain);
     micMonitorGain.connect(ctx.destination);
     // micGain → micVolumeGain (connected when mic is added)
-    // soundboardBus → padsVolumeGain → padsPan → (broadcast + local)
+    // soundboardBus → padsVolumeGain → padsDuckGain → padsPan → (broadcast + local)
     soundboardBus.connect(padsVolumeGain);
-    padsVolumeGain.connect(padsPan);
+    padsVolumeGain.connect(padsDuckGain);
+    padsDuckGain.connect(padsPan);
     // padsPan → sbToBroadcastGain → broadcastBus
     padsPan.connect(sbToBroadcastGain);
     sbToBroadcastGain.connect(broadcastBus);
@@ -224,12 +266,16 @@ export function useAudioMixer(): UseAudioMixerReturn {
     limiterRef.current = limiter;
     clipperRef.current = clipper;
     micMonitorGainRef.current = micMonitorGain;
+    padsDuckGainRef.current = padsDuckGain;
     micAnalyserRef.current = micAnalyser;
     padsAnalyserRef.current = padsAnalyser;
     micAnalyserDataRef.current = new Uint8Array(micAnalyser.fftSize);
     padsAnalyserDataRef.current = new Uint8Array(padsAnalyser.fftSize);
 
     setMixedStream(dest.stream);
+
+    // Start the ducking detector if it was enabled before the graph existed
+    updateDuckLoopRef.current?.();
 
     return { ctx, dest, broadcastBus, soundboardBus, micGain, micVolumeGain };
   }, []);
@@ -312,8 +358,13 @@ export function useAudioMixer(): UseAudioMixerReturn {
       const sysMonitorGain = ctx.createGain();
       sysMonitorGain.gain.value = sysMonitorOnRef.current ? 1 : 0;
 
+      // Duck gain inserted at build time; picks up any duck already in progress
+      const sysDuckGain = ctx.createGain();
+      sysDuckGain.gain.value = duckActiveRef.current && duckingRef.current.system ? DUCK_GAIN : 1;
+
       source.connect(gain);
-      gain.connect(pan);
+      gain.connect(sysDuckGain);
+      sysDuckGain.connect(pan);
       pan.connect(broadcastBusRef.current!);
       pan.connect(analyser);
       // Per-channel headphone monitor for system audio
@@ -323,6 +374,7 @@ export function useAudioMixer(): UseAudioMixerReturn {
       sysAudioSourceRef.current = source;
       sysAudioGainRef.current = gain;
       sysAudioPanRef.current = pan;
+      sysDuckGainRef.current = sysDuckGain;
       sysMonitorGainRef.current = sysMonitorGain;
       systemAnalyserRef.current = analyser;
       systemAnalyserDataRef.current = new Uint8Array(analyser.fftSize);
@@ -349,6 +401,9 @@ export function useAudioMixer(): UseAudioMixerReturn {
     }
     if (sysAudioPanRef.current) {
       sysAudioPanRef.current = null;
+    }
+    if (sysDuckGainRef.current) {
+      sysDuckGainRef.current = null;
     }
     if (systemAnalyserRef.current) {
       systemAnalyserRef.current = null;
@@ -505,7 +560,7 @@ export function useAudioMixer(): UseAudioMixerReturn {
     }
   }, [buildClipCurve]);
 
-  const analyserLevel = useCallback((analyser: AnalyserNode | null, data: Uint8Array | null): number => {
+  const analyserLevel = useCallback((analyser: AnalyserNode | null, data: Uint8Array<ArrayBuffer> | null): number => {
     if (!analyser || !data) return 0;
     analyser.getByteTimeDomainData(data);
     let sum = 0;
@@ -528,6 +583,100 @@ export function useAudioMixer(): UseAudioMixerReturn {
     };
   }, [analyserLevel]);
 
+  // ── Ducking ──
+
+  /** Post-effects mic RMS in dBFS (uses the existing mic analyser, fed from micPan) */
+  const readMicRmsDb = useCallback((): number => {
+    const analyser = micAnalyserRef.current;
+    if (!analyser) return -100;
+    let data = duckDataRef.current;
+    if (!data || data.length !== analyser.fftSize) {
+      data = new Uint8Array(analyser.fftSize);
+      duckDataRef.current = data;
+    }
+    analyser.getByteTimeDomainData(data);
+    let sum = 0;
+    for (let i = 0; i < data.length; i++) {
+      const normalized = (data[i] - 128) / 128;
+      sum += normalized * normalized;
+    }
+    const rms = Math.sqrt(sum / data.length);
+    return rms <= 0 ? -100 : 20 * Math.log10(rms);
+  }, []);
+
+  /** Engage or release the duck on every enabled channel */
+  const applyDuck = useCallback((active: boolean) => {
+    duckActiveRef.current = active;
+    setDuckActiveState(active);
+    const ctx = ctxRef.current;
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const enabled = duckingRef.current;
+    const tc = active ? DUCK_ATTACK_TC : DUCK_RELEASE_TC;
+    if (padsDuckGainRef.current) {
+      padsDuckGainRef.current.gain.setTargetAtTime(active && enabled.pads ? DUCK_GAIN : 1, now, tc);
+    }
+    if (sysDuckGainRef.current) {
+      sysDuckGainRef.current.gain.setTargetAtTime(active && enabled.system ? DUCK_GAIN : 1, now, tc);
+    }
+  }, []);
+
+  const duckTick = useCallback(() => {
+    if (!ctxRef.current || ctxRef.current.state === 'closed') return;
+    const db = readMicRmsDb();
+    if (db > DUCK_THRESHOLD_DB) {
+      duckAboveCountRef.current += 1;
+      duckBelowMsRef.current = 0;
+      if (!duckActiveRef.current && duckAboveCountRef.current >= DUCK_ATTACK_READINGS) {
+        applyDuck(true);
+      }
+    } else {
+      duckAboveCountRef.current = 0;
+      duckBelowMsRef.current += DUCK_INTERVAL_MS;
+      if (duckActiveRef.current && duckBelowMsRef.current >= DUCK_RELEASE_HOLD_MS) {
+        applyDuck(false);
+      }
+    }
+  }, [readMicRmsDb, applyDuck]);
+
+  /** Run the detector only while a duck channel is enabled and the mixer is live */
+  const updateDuckLoop = useCallback(() => {
+    const anyEnabled = duckingRef.current.pads || duckingRef.current.system;
+    const live = !!ctxRef.current && ctxRef.current.state !== 'closed';
+    if (anyEnabled && live) {
+      if (duckIntervalRef.current === null) {
+        duckAboveCountRef.current = 0;
+        duckBelowMsRef.current = 0;
+        duckIntervalRef.current = window.setInterval(duckTick, DUCK_INTERVAL_MS);
+      }
+    } else if (duckIntervalRef.current !== null) {
+      window.clearInterval(duckIntervalRef.current);
+      duckIntervalRef.current = null;
+      if (duckActiveRef.current) {
+        applyDuck(false);
+      }
+    }
+  }, [duckTick, applyDuck]);
+  updateDuckLoopRef.current = updateDuckLoop;
+
+  const setDucking = useCallback(
+    (channel: DuckChannel, enabled: boolean) => {
+      duckingRef.current = { ...duckingRef.current, [channel]: enabled };
+      setDuckingState(duckingRef.current);
+
+      // If a duck is in progress, bring this channel in line immediately
+      const ctx = ctxRef.current;
+      const gainRef = channel === 'pads' ? padsDuckGainRef : sysDuckGainRef;
+      if (ctx && gainRef.current) {
+        const target = duckActiveRef.current && enabled ? DUCK_GAIN : 1;
+        gainRef.current.gain.setTargetAtTime(target, ctx.currentTime, target === 1 ? DUCK_RELEASE_TC : DUCK_ATTACK_TC);
+      }
+
+      updateDuckLoop();
+    },
+    [updateDuckLoop],
+  );
+
   /** Expose internal nodes so the effects chain can wire itself in */
   const getNodes = useCallback(() => {
     if (!ctxRef.current || !micGainRef.current || !micVolumeGainRef.current || !broadcastBusRef.current || !clipperRef.current) return null;
@@ -543,6 +692,10 @@ export function useAudioMixer(): UseAudioMixerReturn {
   // Cleanup on unmount
   useEffect(() => {
     return () => {
+      if (duckIntervalRef.current !== null) {
+        window.clearInterval(duckIntervalRef.current);
+        duckIntervalRef.current = null;
+      }
       micSourceRef.current?.disconnect();
       sysAudioSourceRef.current?.disconnect();
       sysAudioStreamRef.current?.getTracks().forEach(t => t.stop());
@@ -574,5 +727,8 @@ export function useAudioMixer(): UseAudioMixerReturn {
     setPadsMonitor,
     getChannelLevels,
     getNodes,
+    ducking,
+    setDucking,
+    duckActive,
   };
 }

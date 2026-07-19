@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
+import type { FxName } from '@/hooks/useMicEffects';
 
 export interface ShortcutHandlers {
   onToggleMute: () => void;
@@ -6,12 +7,22 @@ export interface ShortcutHandlers {
   onToggleListen: () => void;
   onToggleCue: () => void;
   onTriggerPad: (index: number) => void;
+  /** Momentary FX: key down engages, key up releases */
+  onFxDown?: (name: FxName) => void;
+  onFxUp?: (name: FxName) => void;
 }
 
 interface UseKeyboardShortcutsReturn {
   showHelp: boolean;
   setShowHelp: (show: boolean) => void;
 }
+
+const FX_KEYS: Record<string, FxName> = {
+  q: 'radioVoice',
+  w: 'bigRoom',
+  e: 'slapback',
+  t: 'pitchDrop',
+};
 
 /**
  * Keyboard shortcuts for the broadcaster.
@@ -24,13 +35,21 @@ export function useKeyboardShortcuts(
 ): UseKeyboardShortcutsReturn {
   const [showHelp, setShowHelp] = useState(false);
 
+  const isFormTarget = (e: KeyboardEvent) => {
+    const tag = (e.target as HTMLElement)?.tagName;
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+  };
+
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
       if (!active) return;
+      if (isFormTarget(e)) return;
 
-      // Ignore when typing in form elements
-      const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      const fx = FX_KEYS[e.key.toLowerCase()];
+      if (fx && handlers.onFxDown) {
+        if (!e.repeat) handlers.onFxDown(fx);
+        return;
+      }
 
       switch (e.key) {
         case ' ':
@@ -52,7 +71,7 @@ export function useKeyboardShortcuts(
         case '?':
           setShowHelp((prev) => !prev);
           break;
-        // Number keys: 1-9 → pads 0-8, 0 → pad 9
+        // Number keys: 1-9 map to pads 0-8, 0 maps to pad 9
         case '1': handlers.onTriggerPad(0); break;
         case '2': handlers.onTriggerPad(1); break;
         case '3': handlers.onTriggerPad(2); break;
@@ -68,10 +87,26 @@ export function useKeyboardShortcuts(
     [active, handlers],
   );
 
+  const handleKeyUp = useCallback(
+    (e: KeyboardEvent) => {
+      if (!active) return;
+      if (isFormTarget(e)) return;
+      const fx = FX_KEYS[e.key.toLowerCase()];
+      if (fx && handlers.onFxUp) {
+        handlers.onFxUp(fx);
+      }
+    },
+    [active, handlers],
+  );
+
   useEffect(() => {
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleKeyDown]);
+    window.addEventListener('keyup', handleKeyUp);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, [handleKeyDown, handleKeyUp]);
 
   return { showHelp, setShowHelp };
 }
@@ -83,5 +118,9 @@ export const SHORTCUT_MAP = [
   { key: 'L', description: 'Toggle listen' },
   { key: 'C', description: 'Toggle cue mode' },
   { key: '1–9, 0', description: 'Trigger sound pads 1–10' },
+  { key: 'Q', description: 'Hold for Radio Voice FX' },
+  { key: 'W', description: 'Hold for Big Room FX' },
+  { key: 'E', description: 'Hold for Slapback FX' },
+  { key: 'T', description: 'Hold for Pitch Drop FX' },
   { key: '?', description: 'Show/hide shortcuts' },
 ];

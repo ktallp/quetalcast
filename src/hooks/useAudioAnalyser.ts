@@ -11,6 +11,14 @@ export interface AudioAnalysis {
   right: ChannelAnalysis;
 }
 
+export interface UseAudioAnalyserReturn extends AudioAnalysis {
+  /**
+   * Raw time-domain samples (left channel) from the analyser, or null if no
+   * stream is connected. Used by useSoundCheck for RMS measurement.
+   */
+  getAnalyserData: () => Float32Array | null;
+}
+
 const MIN_DB = -60;
 
 /** Convert a linear amplitude (0–1) to dBFS, clamped to MIN_DB */
@@ -23,7 +31,7 @@ function toDbfs(linear: number): number {
 const EMPTY_CHANNEL: ChannelAnalysis = { level: MIN_DB, peak: MIN_DB, clipping: false };
 const EMPTY_ANALYSIS: AudioAnalysis = { left: { ...EMPTY_CHANNEL }, right: { ...EMPTY_CHANNEL } };
 
-function analyseChannel(analyser: AnalyserNode, data: Float32Array) {
+function analyseChannel(analyser: AnalyserNode, data: Float32Array<ArrayBuffer>) {
   analyser.getFloatTimeDomainData(data);
 
   let sum = 0;
@@ -42,7 +50,7 @@ function analyseChannel(analyser: AnalyserNode, data: Float32Array) {
   };
 }
 
-export function useAudioAnalyser(stream: MediaStream | null): AudioAnalysis {
+export function useAudioAnalyser(stream: MediaStream | null): UseAudioAnalyserReturn {
   const [analysis, setAnalysis] = useState<AudioAnalysis>(EMPTY_ANALYSIS);
   const contextRef = useRef<AudioContext | null>(null);
   const leftAnalyserRef = useRef<AnalyserNode | null>(null);
@@ -170,5 +178,13 @@ export function useAudioAnalyser(stream: MediaStream | null): AudioAnalysis {
     };
   }, [stream, tick]);
 
-  return analysis;
+  const getAnalyserData = useCallback((): Float32Array | null => {
+    const analyser = leftAnalyserRef.current;
+    if (!analyser) return null;
+    const data = new Float32Array(analyser.fftSize);
+    analyser.getFloatTimeDomainData(data);
+    return data;
+  }, []);
+
+  return { ...analysis, getAnalyserData };
 }

@@ -7,6 +7,9 @@
  *
  * Messages:
  *   { thresholdDb: number }  — gate threshold in dBFS (-80 to -20)
+ *
+ * Outbound messages (posted only when the state changes):
+ *   { type: 'gateState', open: boolean }
  */
 class NoiseGateProcessor extends AudioWorkletProcessor {
   constructor() {
@@ -22,6 +25,8 @@ class NoiseGateProcessor extends AudioWorkletProcessor {
     // Smoothing coefficients (attack = open speed, release = close speed)
     this._attackCoeff = 0.01;  // fast open
     this._releaseCoeff = 0.002; // slower close to avoid clicks
+    // Last open/closed state reported to the main thread
+    this._lastOpen = true;
 
     this.port.onmessage = (e) => {
       if (typeof e.data.thresholdDb === 'number') {
@@ -60,6 +65,14 @@ class NoiseGateProcessor extends AudioWorkletProcessor {
     }
 
     const targetGain = (gateOpen || this._holdSamples > 0) ? 1 : 0;
+
+    // Report open/closed transitions to the main thread (throttled to state
+    // changes only, for UI meters)
+    const isOpen = targetGain === 1;
+    if (isOpen !== this._lastOpen) {
+      this._lastOpen = isOpen;
+      this.port.postMessage({ type: 'gateState', open: isOpen });
+    }
 
     // Apply gain with smoothing (per-sample for click-free transitions)
     for (let ch = 0; ch < input.length; ch++) {

@@ -20,7 +20,7 @@ export interface UseWebRTCReturn {
   /** Rejoin an existing room as broadcaster (for "continue previous broadcast") */
   joinRoomAsBroadcaster: (roomId: string) => void;
   stop: () => void;
-  createRoom: (customId?: string) => void;
+  createRoom: (customId?: string, streamTitle?: string, streamDescription?: string) => void;
   roomId: string | null;
   setAudioQuality: (quality: AudioQuality) => void;
   /** The actual quality level in use (meaningful when mode is 'auto') */
@@ -610,7 +610,7 @@ export function useWebRTC(
   }, [signaling, role, createPCForReceiver]);
 
   const createRoom = useCallback((customId?: string, streamTitle?: string, streamDescription?: string) => {
-    const msg: Record<string, string> = { type: 'create-room' };
+    const msg: { type: string; [key: string]: string } = { type: 'create-room' };
     if (customId) msg.customId = customId;
     if (streamTitle) msg.streamTitle = streamTitle;
     if (streamDescription) msg.streamDescription = streamDescription;
