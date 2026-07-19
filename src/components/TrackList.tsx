@@ -41,6 +41,8 @@ interface TrackListProps {
   alwaysShow?: boolean;
   /** Room ID to include in CSV export */
   roomId?: string;
+  /** Render without the outer panel/accordion chrome (for use inside a tab) */
+  bare?: boolean;
 }
 
 function formatDuration(sec?: number): string {
@@ -277,11 +279,132 @@ function TrackDetailModal({ track, open, onOpenChange }: { track: Track | null; 
 }
 
 /* ── Main TrackList Component ── */
-export function TrackList({ tracks, topContent, alwaysShow, roomId }: TrackListProps) {
+export function TrackList({ tracks, topContent, alwaysShow, roomId, bare }: TrackListProps) {
   const [selectedTrack, setSelectedTrack] = useState<Track | null>(null);
 
   const showPanel = alwaysShow || tracks.length > 0 || topContent;
   if (!showPanel) return null;
+
+  const listBody = (
+    <>
+      {topContent && (
+        <div className="pt-3 pb-2 border-b border-border">
+          {topContent}
+        </div>
+      )}
+      {tracks.length === 0 ? (
+        <div className="py-8 text-center text-muted-foreground text-xs">
+          No tracks have been added yet
+        </div>
+      ) : (
+        <>
+          <div className="flex items-center gap-2.5 px-2 py-1 text-[10px] font-semibold text-muted-foreground/60 uppercase tracking-wider border-b border-border">
+            <span className="w-16 shrink-0">Time</span>
+            <span className="w-8 shrink-0" />
+            <span className="flex-1 min-w-0">Title</span>
+            <span className="hidden sm:block w-32 shrink-0 truncate">Album</span>
+            <span className="w-10 shrink-0 text-right">Dur.</span>
+            <span className="hidden sm:block w-10 shrink-0 text-right">Year</span>
+          </div>
+
+          <div className="space-y-0 max-h-72 overflow-y-auto scrollbar-thin">
+            {tracks.map((track, i) => {
+              const year = extractYear(track.releaseDate);
+              const dur = formatDuration(track.duration);
+              const isCurrent = i === 0;
+
+              return (
+                <button
+                  key={i}
+                  onClick={() => setSelectedTrack(track)}
+                  className={`w-full flex items-center gap-2.5 px-2 py-1.5 text-xs text-left transition-colors cursor-pointer ${
+                    isCurrent ? 'bg-primary/5 hover:bg-primary/10' : 'hover:bg-secondary/50'
+                  }`}
+                >
+                  <span className="w-16 shrink-0 text-muted-foreground/60 tabular-nums font-mono">
+                    {formatTime(track.time)}
+                  </span>
+
+                  {(track.coverMedium || track.cover) ? (
+                    <img
+                      src={track.coverMedium || track.cover}
+                      alt=""
+                      className="w-8 h-8 rounded shrink-0 bg-secondary"
+                      loading="lazy"
+                    />
+                  ) : (
+                    <div className="w-8 h-8 rounded bg-secondary shrink-0 flex items-center justify-center">
+                      <Disc3
+                        className={`h-3.5 w-3.5 ${
+                          isCurrent ? 'text-primary animate-spin' : 'text-muted-foreground/40'
+                        }`}
+                        style={isCurrent ? { animationDuration: '3s' } : undefined}
+                      />
+                    </div>
+                  )}
+
+                  <div className="flex-1 min-w-0">
+                    <div className={`truncate ${isCurrent ? 'text-foreground font-medium' : 'text-foreground/80'}`}>
+                      {track.trackTitle || track.title}
+                    </div>
+                    {track.artist && (
+                      <div className="text-[10px] text-muted-foreground truncate">
+                        {track.artist}
+                      </div>
+                    )}
+                  </div>
+
+                  <span className="hidden sm:block w-32 shrink-0 text-muted-foreground truncate text-[11px]">
+                    {track.album || ''}
+                  </span>
+
+                  <span className="w-10 shrink-0 text-right tabular-nums text-muted-foreground/60 font-mono">
+                    {dur}
+                  </span>
+
+                  <span className="hidden sm:block w-10 shrink-0 text-right tabular-nums text-muted-foreground/60 font-mono">
+                    {year}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
+    </>
+  );
+
+  const detailModal = (
+    <TrackDetailModal
+      track={selectedTrack}
+      open={!!selectedTrack}
+      onOpenChange={(open) => { if (!open) setSelectedTrack(null); }}
+    />
+  );
+
+  if (bare) {
+    return (
+      <>
+        <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+          <ListMusic className="h-3.5 w-3.5" aria-hidden />
+          Track List
+          <span className="font-normal text-muted-foreground/60">({tracks.length})</span>
+          {tracks.length > 0 && (
+            <button
+              onClick={() => downloadCsv(tracks, roomId)}
+              className="p-0.5 ml-1 text-muted-foreground hover:text-foreground transition-colors rounded cursor-pointer"
+              title="Download track list as CSV"
+              aria-label="Download track list as CSV"
+            >
+              <Download className="h-3 w-3" aria-hidden />
+            </button>
+          )}
+        </div>
+        {listBody}
+        {detailModal}
+      </>
+    );
+  }
 
   return (
     <>
@@ -308,108 +431,13 @@ export function TrackList({ tracks, topContent, alwaysShow, roomId }: TrackListP
               </span>
             </AccordionTrigger>
             <AccordionContent className="px-4 pb-4 pt-0">
-          {topContent && (
-            <div className="pt-3 pb-2 border-b border-border">
-              {topContent}
-            </div>
-          )}
-          {tracks.length === 0 ? (
-            <div className="py-8 text-center text-muted-foreground text-xs">
-              No tracks have been added yet
-            </div>
-          ) : (
-            <>
-        {/* Column headers — Time first, then cover */}
-        <div className="flex items-center gap-2.5 px-2 py-1 text-[10px] font-semibold text-muted-foreground/60 uppercase tracking-wider border-b border-border">
-          <span className="w-16 shrink-0">Time</span>
-          <span className="w-8 shrink-0" />
-          <span className="flex-1 min-w-0">Title</span>
-          <span className="hidden sm:block w-32 shrink-0 truncate">Album</span>
-          <span className="w-10 shrink-0 text-right">Dur.</span>
-          <span className="hidden sm:block w-10 shrink-0 text-right">Year</span>
-        </div>
-
-        <div className="space-y-0 max-h-72 overflow-y-auto scrollbar-thin">
-          {tracks.map((track, i) => {
-            const year = extractYear(track.releaseDate);
-            const dur = formatDuration(track.duration);
-            const isCurrent = i === 0;
-
-            return (
-              <button
-                key={i}
-                onClick={() => setSelectedTrack(track)}
-                className={`w-full flex items-center gap-2.5 px-2 py-1.5 text-xs text-left transition-colors cursor-pointer ${
-                  isCurrent ? 'bg-primary/5 hover:bg-primary/10' : 'hover:bg-secondary/50'
-                }`}
-              >
-                {/* Time played — first */}
-                <span className="w-16 shrink-0 text-muted-foreground/60 tabular-nums font-mono">
-                  {formatTime(track.time)}
-                </span>
-
-                {/* Artwork */}
-                {(track.coverMedium || track.cover) ? (
-                  <img
-                    src={track.coverMedium || track.cover}
-                    alt=""
-                    className="w-8 h-8 rounded shrink-0 bg-secondary"
-                    loading="lazy"
-                  />
-                ) : (
-                  <div className="w-8 h-8 rounded bg-secondary shrink-0 flex items-center justify-center">
-                    <Disc3
-                      className={`h-3.5 w-3.5 ${
-                        isCurrent ? 'text-primary animate-spin' : 'text-muted-foreground/40'
-                      }`}
-                      style={isCurrent ? { animationDuration: '3s' } : undefined}
-                    />
-                  </div>
-                )}
-
-                {/* Title + Artist */}
-                <div className="flex-1 min-w-0">
-                  <div className={`truncate ${isCurrent ? 'text-foreground font-medium' : 'text-foreground/80'}`}>
-                    {track.trackTitle || track.title}
-                  </div>
-                  {track.artist && (
-                    <div className="text-[10px] text-muted-foreground truncate">
-                      {track.artist}
-                    </div>
-                  )}
-                </div>
-
-                {/* Album */}
-                <span className="hidden sm:block w-32 shrink-0 text-muted-foreground truncate text-[11px]">
-                  {track.album || ''}
-                </span>
-
-                {/* Duration */}
-                <span className="w-10 shrink-0 text-right tabular-nums text-muted-foreground/60 font-mono">
-                  {dur}
-                </span>
-
-                {/* Year */}
-                <span className="hidden sm:block w-10 shrink-0 text-right tabular-nums text-muted-foreground/60 font-mono">
-                  {year}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-            </>
-          )}
+              {listBody}
             </AccordionContent>
           </AccordionItem>
         </Accordion>
       </div>
 
-      {/* Track Detail Modal */}
-      <TrackDetailModal
-        track={selectedTrack}
-        open={!!selectedTrack}
-        onOpenChange={(open) => { if (!open) setSelectedTrack(null); }}
-      />
+      {detailModal}
     </>
   );
 }

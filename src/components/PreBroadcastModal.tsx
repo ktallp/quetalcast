@@ -71,6 +71,7 @@ export function PreBroadcastModal({ open, onOpenChange, onStart, onSkip }: PreBr
   const [showUrlSuggestions, setShowUrlSuggestions] = useState(false);
   const [streamTitle, setStreamTitle] = useState(() => localStorage.getItem(TITLE_KEY) ?? '');
   const [streamDescription, setStreamDescription] = useState(() => localStorage.getItem(DESC_KEY) ?? '');
+  const [pendingDeleteSlug, setPendingDeleteSlug] = useState<string | null>(null);
   const urlInputRef = useRef<HTMLInputElement>(null);
 
   const refreshSlugs = useCallback(async () => {
@@ -141,7 +142,7 @@ export function PreBroadcastModal({ open, onOpenChange, onStart, onSkip }: PreBr
             <input
               value={streamDescription}
               onChange={(e) => setStreamDescription(e.target.value)}
-              placeholder="e.g. Live from El Paso — chill beats and good vibes"
+              placeholder="e.g. Live from El Paso, chill beats and good vibes"
               maxLength={200}
               className="w-full rounded-md border border-border bg-input px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-1 focus:ring-ring"
             />
@@ -222,17 +223,34 @@ export function PreBroadcastModal({ open, onOpenChange, onStart, onSkip }: PreBr
                         )}
                       </button>
                       {!live && (
-                        <button
-                          className="opacity-0 group-hover:opacity-100 text-muted-foreground/40 hover:text-destructive transition-all shrink-0 ml-2"
-                          onMouseDown={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            deleteServerSlug(slug).then(refreshSlugs);
-                          }}
-                          title="Remove"
-                        >
-                          <X className="h-3 w-3" />
-                        </button>
+                        pendingDeleteSlug === slug ? (
+                          <button
+                            className="text-[10px] font-semibold text-destructive shrink-0 ml-2"
+                            onMouseDown={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              setPendingDeleteSlug(null);
+                              deleteServerSlug(slug).then(refreshSlugs);
+                            }}
+                            aria-label={`Confirm delete saved URL ${slug}`}
+                          >
+                            Delete?
+                          </button>
+                        ) : (
+                          <button
+                            className="opacity-0 group-hover:opacity-100 text-muted-foreground/40 hover:text-destructive transition-all shrink-0 ml-2"
+                            onMouseDown={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              setPendingDeleteSlug(slug);
+                              setTimeout(() => setPendingDeleteSlug((cur) => (cur === slug ? null : cur)), 3000);
+                            }}
+                            title="Remove"
+                            aria-label={`Remove saved URL ${slug}`}
+                          >
+                            <X className="h-3 w-3" aria-hidden />
+                          </button>
+                        )
                       )}
                     </div>
                   ))}

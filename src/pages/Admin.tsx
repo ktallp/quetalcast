@@ -1,46 +1,55 @@
-import { useState, useEffect } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { isAuthenticated } from '@/lib/auth';
+import { isAuthenticated, isOwner, verifySession } from '@/lib/auth';
 import { Shield } from 'lucide-react';
-
-interface RoomInfo {
-  roomId: string;
-  broadcaster: boolean;
-  receiver: boolean;
-  createdAt: string;
-}
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { RoomsPanel, type AdminRoom, type RoomStats } from '@/components/admin/RoomsPanel';
+import { UsersPanel } from '@/components/admin/UsersPanel';
 
 const Admin = () => {
   const navigate = useNavigate();
-  const [rooms, setRooms] = useState<RoomInfo[]>([]);
+  const [stats, setStats] = useState<RoomStats | null>(null);
+  const [rooms, setRooms] = useState<AdminRoom[]>([]);
+  const [loading, setLoading] = useState(true);
   const [serverStatus, setServerStatus] = useState<'unknown' | 'online' | 'offline'>('unknown');
+  const owner = isOwner();
 
+  // Auth gate: quick local check, then verify against the server
   useEffect(() => {
-    if (!isAuthenticated()) navigate('/login');
+    if (!isAuthenticated()) {
+      navigate('/login');
+      return;
+    }
+    verifySession().then((valid) => {
+      if (!valid) navigate('/login');
+    });
   }, [navigate]);
 
-  // Poll admin endpoint
-  useEffect(() => {
-    const poll = async () => {
-      try {
-        const host = window.location.hostname;
-        const res = await fetch(`http://${host}:3001/admin/rooms`);
-        if (res.ok) {
-          const data = await res.json();
-          setRooms(data.rooms || []);
-          setServerStatus('online');
-        } else {
-          setServerStatus('offline');
-        }
-      } catch {
+  const poll = useCallback(async () => {
+    try {
+      const res = await fetch('/admin/rooms', { credentials: 'include' });
+      if (res.ok) {
+        const data = await res.json();
+        setStats(data.stats || null);
+        setRooms(data.rooms || []);
+        setServerStatus('online');
+      } else if (res.status === 401 || res.status === 403) {
+        navigate('/login');
+      } else {
         setServerStatus('offline');
       }
-    };
+    } catch {
+      setServerStatus('offline');
+    } finally {
+      setLoading(false);
+    }
+  }, [navigate]);
 
+  useEffect(() => {
     poll();
     const interval = setInterval(poll, 5000);
     return () => clearInterval(interval);
-  }, []);
+  }, [poll]);
 
   return (
     <div className="min-h-screen bg-background flex flex-col">
@@ -54,55 +63,30 @@ const Admin = () => {
         </div>
       </div>
 
-      <div className="flex-1 p-4 max-w-4xl mx-auto w-full space-y-4">
-        <h1 className="text-lg font-semibold text-foreground">Active Rooms</h1>
+      <div className="flex-1 p-4 max-w-5xl mx-auto w-full">
+        <Tabs defaultValue="rooms">
+          <TabsList>
+            <TabsTrigger value="rooms">Rooms</TabsTrigger>
+            {owner && <TabsTrigger value="users">Users</TabsTrigger>}
+          </TabsList>
 
-        {rooms.length === 0 && (
-          <div className="panel text-center text-sm text-muted-foreground py-8">
-            {serverStatus === 'offline'
-              ? 'Cannot reach signaling server'
-              : 'No active rooms'}
-          </div>
-        )}
+          <TabsContent value="rooms" className="mt-4">
+            <RoomsPanel
+              stats={stats}
+              rooms={rooms}
+              loading={loading}
+              error={serverStatus === 'offline'}
+              isOwner={owner}
+              onRefresh={poll}
+            />
+          </TabsContent>
 
-        <div className="space-y-2">
-          {rooms.map((room) => (
-            <div key={room.roomId} className="panel flex items-center justify-between">
-              <div>
-                <div className="text-sm font-mono text-foreground">{room.roomId.slice(0, 16)}…</div>
-                <div className="text-xs text-muted-foreground mt-0.5">
-                  Created: {new Date(room.createdAt).toLocaleTimeString()}
-                </div>
-              </div>
-              <div className="flex gap-3">
-                <div className={`status-badge text-[10px] ${room.broadcaster ? 'status-on-air' : 'status-offline'}`}>
-                  Broadcaster
-                </div>
-                <div className={`status-badge text-[10px] ${room.receiver ? 'status-receiving' : 'status-offline'}`}>
-                  Receiver
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
-
-        <div className="panel">
-          <div className="panel-header">Navigation</div>
-          <div className="flex gap-2">
-            <button
-              onClick={() => navigate('/broadcast')}
-              className="bg-secondary text-secondary-foreground rounded-md px-4 py-2 text-sm font-mono hover:opacity-80 transition-opacity"
-            >
-              Broadcaster
-            </button>
-            <button
-              onClick={() => navigate('/receive')}
-              className="bg-secondary text-secondary-foreground rounded-md px-4 py-2 text-sm font-mono hover:opacity-80 transition-opacity"
-            >
-              Receiver
-            </button>
-          </div>
-        </div>
+          {owner && (
+            <TabsContent value="users" className="mt-4">
+              <UsersPanel />
+            </TabsContent>
+          )}
+        </Tabs>
       </div>
     </div>
   );

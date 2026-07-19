@@ -6,8 +6,38 @@ on:
     branches:
       - main
 jobs:
+  checks:
+    name: Lint, typecheck, test, build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Lint
+        run: pnpm lint
+      - name: Typecheck
+        run: npx tsc -p tsconfig.app.json --noEmit
+      - name: Frontend tests
+        run: pnpm test
+      - name: Build
+        run: pnpm build
+      - name: Install server dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: server
+      - name: Server tests
+        run: pnpm test
+        working-directory: server
+
   deploy:
     name: Deploy app
+    needs: checks
     runs-on: ubuntu-latest
     concurrency: deploy-group    # optional: ensure only one action runs at a time
     steps:

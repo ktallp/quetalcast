@@ -2,19 +2,25 @@ import { useCallback, useRef, useState } from 'react';
 
 // ── Types ──────────────────────────────────────────────────────────
 
-export type EffectName = 'enhance' | 'tone' | 'voiceShift' | 'delay' | 'echo' | 'compressor';
+export type EffectName = 'enhance' | 'tone' | 'voiceShift' | 'delay' | 'echo' | 'compressor' | 'deEsser';
+
+/** Momentary (hold-to-engage) FX triggered via triggerFx / releaseFx */
+export type FxName = 'radioVoice' | 'bigRoom' | 'slapback' | 'pitchDrop';
+
+export const FX_NAMES: FxName[] = ['radioVoice', 'bigRoom', 'slapback', 'pitchDrop'];
 
 export interface EffectState {
   enabled: boolean;
   params: Record<string, number>;
 }
 
-export const CHAIN_ORDER: EffectName[] = ['enhance', 'tone', 'compressor', 'voiceShift', 'delay', 'echo'];
+export const CHAIN_ORDER: EffectName[] = ['enhance', 'tone', 'compressor', 'deEsser', 'voiceShift', 'delay', 'echo'];
 
 export const EFFECT_LABELS: Record<EffectName, string> = {
   enhance: 'Enhance',
   tone: 'Tone',
   compressor: 'Compressor',
+  deEsser: 'De-esser',
   voiceShift: 'Voice Shift',
   delay: 'Delay',
   echo: 'Reverb',
@@ -24,6 +30,7 @@ export const DEFAULT_PARAMS: Record<EffectName, Record<string, number>> = {
   enhance: { gate: 30, cleanup: 30, clarity: 0 },
   tone: { bass: 0, mids: 0, treble: 0 },
   compressor: { amount: 50, speed: 50, makeup: 0 },
+  deEsser: { amount: 40 },
   voiceShift: { shift: 50 },
   delay: { timing: 30, repeats: 30, amount: 50 },
   echo: { space: 50, fade: 50, amount: 30 },
@@ -41,16 +48,51 @@ interface EffectNodeSet {
 
 function generateImpulse(ctx: AudioContext, space: number, fade: number): AudioBuffer {
   // space 0-100 → duration 0.1 – 5 s
-  // fade  0-100 → decay exponent
+  // fade  0-100 → decay rate
   const duration = 0.1 + (space / 100) * 4.9;
   const decayRate = 0.5 + (fade / 100) * 5;
-  const length = Math.max(Math.floor(ctx.sampleRate * duration), 1);
-  const buffer = ctx.createBuffer(2, length, ctx.sampleRate);
+  const sampleRate = ctx.sampleRate;
+  const length = Math.max(Math.floor(sampleRate * duration), 1);
+  const buffer = ctx.createBuffer(2, length, sampleRate);
+
+  // 9 discrete early reflections spread over the first 40ms, decaying in level
+  const reflectionCount = 9;
+  const earlyReflections: Array<{ offset: number; gain: number }> = [];
+  for (let r = 0; r < reflectionCount; r++) {
+    const timeSec = 0.005 + (r / (reflectionCount - 1)) * 0.035;
+    earlyReflections.push({
+      offset: Math.floor(timeSec * sampleRate),
+      gain: 0.6 * Math.pow(0.8, r),
+    });
+  }
 
   for (let ch = 0; ch < 2; ch++) {
     const data = buffer.getChannelData(ch);
+
+    // Decorrelated noise tail (fresh random per channel) with exponential decay
     for (let i = 0; i < length; i++) {
-      data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / length, decayRate);
+      const t = i / length;
+      data[i] = (Math.random() * 2 - 1) * Math.exp(-3 * decayRate * t);
+    }
+
+    // Progressive lowpass damping: a one-pole filter whose smoothing deepens
+    // over the tail so highs die out faster than lows, like a real room
+    let lp = 0;
+    for (let i = 0; i < length; i++) {
+      const t = i / length;
+      const k = 1 - 0.85 * t; // 1 = no filtering at the start, heavy at the end
+      lp = lp + k * (data[i] - lp);
+      data[i] = lp;
+    }
+
+    // Stamp in the early reflections. Opposite polarity and a little timing
+    // jitter per channel keep the stereo image wide.
+    for (const { offset, gain } of earlyReflections) {
+      const jitter = Math.floor(Math.random() * 0.002 * sampleRate);
+      const idx = offset + jitter;
+      if (idx < length) {
+        data[idx] += (ch === 0 ? 1 : -1) * gain * (0.7 + Math.random() * 0.3);
+      }
     }
   }
   return buffer;
@@ -165,6 +207,45 @@ function createCompressorNodes(ctx: AudioContext): EffectNodeSet {
   return { input, output, internals: { compressor, makeupGain } };
 }
 
+/**
+ * De-esser: split-band design. The signal splits at ~5 kHz; the high band
+ * runs through a compressor that clamps sibilance and is summed back with
+ * the untouched low band.
+ */
+function createDeEsserNodes(ctx: AudioContext): EffectNodeSet {
+  const input = ctx.createGain();
+  const output = ctx.createGain();
+
+  const lowBand = ctx.createBiquadFilter();
+  lowBand.type = 'lowpass';
+  lowBand.frequency.value = 5000;
+  lowBand.Q.value = 0.7;
+
+  const highBand = ctx.createBiquadFilter();
+  highBand.type = 'highpass';
+  highBand.frequency.value = 5000;
+  highBand.Q.value = 0.7;
+
+  const sibilanceComp = ctx.createDynamicsCompressor();
+  // Defaults for amount=40 (threshold -32 dB, ratio 6.4)
+  sibilanceComp.threshold.value = -32;
+  sibilanceComp.ratio.value = 6.4;
+  sibilanceComp.knee.value = 6;
+  sibilanceComp.attack.value = 0.002;
+  sibilanceComp.release.value = 0.06;
+
+  // Low band passes through untouched
+  input.connect(lowBand);
+  lowBand.connect(output);
+
+  // High band gets compressed, then summed back in
+  input.connect(highBand);
+  highBand.connect(sibilanceComp);
+  sibilanceComp.connect(output);
+
+  return { input, output, internals: { lowBand, highBand, sibilanceComp } };
+}
+
 function createEchoNodes(ctx: AudioContext): EffectNodeSet {
   const input = ctx.createGain();
   const output = ctx.createGain();
@@ -238,6 +319,14 @@ function applyCompressorParams(nodes: EffectNodeSet, params: Record<string, numb
   (nodes.internals.makeupGain as GainNode).gain.value = Math.pow(10, (makeup / 100) * 24 / 20);
 }
 
+function applyDeEsserParams(nodes: EffectNodeSet, params: Record<string, number>) {
+  const amount = params.amount ?? 40;
+  const comp = nodes.internals.sibilanceComp as DynamicsCompressorNode;
+  // amount 0-100 → threshold -20 to -50 dB, ratio 4 to 10
+  comp.threshold.value = -20 - (amount / 100) * 30;
+  comp.ratio.value = 4 + (amount / 100) * 6;
+}
+
 function applyDelayParams(nodes: EffectNodeSet, params: Record<string, number>) {
   const timing = params.timing ?? 30;
   const repeats = params.repeats ?? 30;
@@ -255,6 +344,138 @@ function applyEchoParams(ctx: AudioContext, nodes: EffectNodeSet, params: Record
   (nodes.internals.wetGain as GainNode).gain.value = amount / 100;
 }
 
+// ── Momentary FX bus ───────────────────────────────────────────────
+
+const FX_ATTACK_SEC = 0.03;  // ramp-in when an FX is triggered
+const FX_RELEASE_SEC = 0.08; // send ramp-out on release (tails keep ringing)
+
+interface FxBusNodes {
+  /** Fixed tail node the effects chain always terminates into */
+  postChain: GainNode;
+  /** Dry path postChain → output; ducked for crossfade-style FX */
+  dryGain: GainNode;
+  /** Per-FX send gains (0 = off, 1 = engaged) */
+  sends: Record<FxName, GainNode>;
+  /** Nodes wired directly into the chain output (for rewiring on output change) */
+  outputs: AudioNode[];
+  /** The chain output node the bus is currently connected to */
+  connectedTo: AudioNode;
+}
+
+function buildDriveCurve() {
+  // Gentle tanh drive for the radio voice
+  const samples = 1024;
+  const curve = new Float32Array(samples);
+  for (let i = 0; i < samples; i++) {
+    const x = (2 * i) / (samples - 1) - 1;
+    curve[i] = Math.tanh(1.8 * x);
+  }
+  return curve;
+}
+
+/** Cancel pending automation and ramp an AudioParam linearly to a target */
+function rampParam(param: AudioParam, ctx: AudioContext, target: number, seconds: number) {
+  const now = ctx.currentTime;
+  param.cancelScheduledValues(now);
+  param.setValueAtTime(param.value, now);
+  param.linearRampToValueAtTime(target, now + seconds);
+}
+
+/**
+ * Permanent parallel FX bus. The voice chain terminates into postChain, which
+ * feeds a dry path plus one send per momentary FX; every wet return sums back
+ * into the chain output. Sends default to 0, so the bus is silent until an FX
+ * is triggered and nothing needs rewiring mid-broadcast.
+ *
+ * The pitch-shift worklet module MUST be loaded before calling this.
+ */
+function createFxBus(ctx: AudioContext, output: AudioNode): FxBusNodes {
+  const postChain = ctx.createGain();
+  const dryGain = ctx.createGain();
+  dryGain.gain.value = 1;
+  postChain.connect(dryGain);
+  dryGain.connect(output);
+
+  // radioVoice: bandpass 300-3400 Hz with slight drive, fully wet while held
+  const radioSend = ctx.createGain();
+  radioSend.gain.value = 0;
+  const radioHighpass = ctx.createBiquadFilter();
+  radioHighpass.type = 'highpass';
+  radioHighpass.frequency.value = 300;
+  radioHighpass.Q.value = 0.7;
+  const radioLowpass = ctx.createBiquadFilter();
+  radioLowpass.type = 'lowpass';
+  radioLowpass.frequency.value = 3400;
+  radioLowpass.Q.value = 0.7;
+  const radioDrive = ctx.createWaveShaper();
+  radioDrive.curve = buildDriveCurve();
+  radioDrive.oversample = '2x';
+  const radioWet = ctx.createGain();
+  radioWet.gain.value = 1;
+  postChain.connect(radioSend);
+  radioSend.connect(radioHighpass);
+  radioHighpass.connect(radioLowpass);
+  radioLowpass.connect(radioDrive);
+  radioDrive.connect(radioWet);
+  radioWet.connect(output);
+
+  // bigRoom: large damped hall (about 2.8s), tail rings out after release
+  const roomSend = ctx.createGain();
+  roomSend.gain.value = 0;
+  const roomConvolver = ctx.createConvolver();
+  roomConvolver.buffer = generateImpulse(ctx, 55, 60);
+  const roomWet = ctx.createGain();
+  roomWet.gain.value = 0.45;
+  postChain.connect(roomSend);
+  roomSend.connect(roomConvolver);
+  roomConvolver.connect(roomWet);
+  roomWet.connect(output);
+
+  // slapback: single 110ms delay with light feedback
+  const slapSend = ctx.createGain();
+  slapSend.gain.value = 0;
+  const slapDelay = ctx.createDelay(1.0);
+  slapDelay.delayTime.value = 0.11;
+  const slapFeedback = ctx.createGain();
+  slapFeedback.gain.value = 0.25;
+  const slapWet = ctx.createGain();
+  slapWet.gain.value = 0.5;
+  postChain.connect(slapSend);
+  slapSend.connect(slapDelay);
+  slapDelay.connect(slapFeedback);
+  slapFeedback.connect(slapDelay);
+  slapDelay.connect(slapWet);
+  slapWet.connect(output);
+
+  // pitchDrop: dedicated pitch-shift worklet fixed at 0.7, ~70% wet while held
+  const pitchSend = ctx.createGain();
+  pitchSend.gain.value = 0;
+  const pitchWorklet = new AudioWorkletNode(ctx, 'pitch-shift-processor');
+  pitchWorklet.port.postMessage({ pitchFactor: 0.7 });
+  const pitchWet = ctx.createGain();
+  pitchWet.gain.value = 0.7;
+  postChain.connect(pitchSend);
+  pitchSend.connect(pitchWorklet);
+  pitchWorklet.connect(pitchWet);
+  pitchWet.connect(output);
+
+  return {
+    postChain,
+    dryGain,
+    sends: { radioVoice: radioSend, bigRoom: roomSend, slapback: slapSend, pitchDrop: pitchSend },
+    outputs: [dryGain, radioWet, roomWet, slapWet, pitchWet],
+    connectedTo: output,
+  };
+}
+
+/** Combined dry level while crossfade-style FX are held */
+function fxDryTarget(active: Record<FxName, boolean>): number {
+  let dry = 1;
+  if (active.radioVoice) dry = Math.min(dry, 0.2);
+  if (active.pitchDrop) dry = Math.min(dry, 0.3);
+  return dry;
+}
+
 // ── Hook ───────────────────────────────────────────────────────────
 
 export interface UseMicEffectsReturn {
@@ -264,6 +485,12 @@ export interface UseMicEffectsReturn {
   replaceEffects: (next: Partial<Record<EffectName, EffectState>>) => void;
   insertIntoChain: (ctx: AudioContext, input: AudioNode, output: AudioNode) => Promise<void>;
   removeFromChain: () => void;
+  bypassed: boolean;
+  setBypassed: (b: boolean) => void;
+  getMeterState: () => { reductionDb: number; gateOpen: boolean };
+  activeFx: Record<FxName, boolean>;
+  triggerFx: (name: FxName) => void;
+  releaseFx: (name: FxName) => void;
 }
 
 function buildInitialState(): Record<EffectName, EffectState> {
@@ -274,11 +501,19 @@ function buildInitialState(): Record<EffectName, EffectState> {
   return state;
 }
 
+function buildInitialFxState(): Record<FxName, boolean> {
+  return { radioVoice: false, bigRoom: false, slapback: false, pitchDrop: false };
+}
+
 export function useMicEffects(): UseMicEffectsReturn {
   const [effects, setEffects] = useState<Record<EffectName, EffectState>>(buildInitialState);
+  const [bypassed, setBypassedState] = useState(false);
+  const [activeFx, setActiveFx] = useState<Record<FxName, boolean>>(buildInitialFxState);
 
-  // Synchronous mirror for audio operations (avoids async React batching)
+  // Synchronous mirrors for audio operations (avoids async React batching)
   const audioStateRef = useRef<Record<EffectName, EffectState>>(buildInitialState());
+  const bypassedRef = useRef(false);
+  const activeFxRef = useRef<Record<FxName, boolean>>(buildInitialFxState());
 
   const ctxRef = useRef<AudioContext | null>(null);
   const chainInputRef = useRef<AudioNode | null>(null);
@@ -286,12 +521,16 @@ export function useMicEffects(): UseMicEffectsReturn {
   const effectNodesRef = useRef<Record<EffectName, EffectNodeSet> | null>(null);
   const chainConnectionsRef = useRef<Array<{ from: AudioNode; to: AudioNode }>>([]);
   const insertedRef = useRef(false);
+  const fxBusRef = useRef<FxBusNodes | null>(null);
+  // Latest gate open/closed state reported by the noise-gate worklet
+  const gateOpenRef = useRef(true);
 
   const createAllNodes = useCallback((ctx: AudioContext): Record<EffectName, EffectNodeSet> => {
     return {
       enhance: createEnhanceNodes(ctx),
       tone: createToneNodes(ctx),
       compressor: createCompressorNodes(ctx),
+      deEsser: createDeEsserNodes(ctx),
       voiceShift: createVoiceShiftNodes(ctx),
       delay: createDelayNodes(ctx),
       echo: createEchoNodes(ctx),
@@ -316,16 +555,23 @@ export function useMicEffects(): UseMicEffectsReturn {
     const connections: Array<{ from: AudioNode; to: AudioNode }> = [];
     let current: AudioNode = micGain;
 
-    for (const name of CHAIN_ORDER) {
-      if (state[name].enabled) {
-        current.connect(nodes[name].input);
-        connections.push({ from: current, to: nodes[name].input });
-        current = nodes[name].output;
+    // When bypassed, skip every effect (enabled flags stay untouched, so
+    // releasing bypass rebuilds the full chain instantly)
+    if (!bypassedRef.current) {
+      for (const name of CHAIN_ORDER) {
+        if (state[name].enabled) {
+          current.connect(nodes[name].input);
+          connections.push({ from: current, to: nodes[name].input });
+          current = nodes[name].output;
+        }
       }
     }
 
-    current.connect(broadcastBus);
-    connections.push({ from: current, to: broadcastBus });
+    // The chain terminates in the FX bus tail (postChain → dry + sends → output)
+    // so momentary FX stay wired no matter which effects are enabled
+    const tail: AudioNode = fxBusRef.current ? fxBusRef.current.postChain : broadcastBus;
+    current.connect(tail);
+    connections.push({ from: current, to: tail });
 
     chainConnectionsRef.current = connections;
   }, []);
@@ -353,6 +599,30 @@ export function useMicEffects(): UseMicEffectsReturn {
 
       if (!effectNodesRef.current) {
         effectNodesRef.current = createAllNodes(ctx);
+        // Listen for gate open/closed reports from the noise-gate worklet
+        const gateWorklet = effectNodesRef.current.enhance.internals.gate as AudioWorkletNode;
+        gateWorklet.port.onmessage = (e) => {
+          if (e.data && e.data.type === 'gateState') {
+            gateOpenRef.current = Boolean(e.data.open);
+          }
+        };
+      }
+
+      if (!fxBusRef.current) {
+        fxBusRef.current = createFxBus(ctx, output);
+        // Sync with any FX latched before the bus existed
+        const active = activeFxRef.current;
+        for (const fx of FX_NAMES) {
+          fxBusRef.current.sends[fx].gain.value = active[fx] ? 1 : 0;
+        }
+        fxBusRef.current.dryGain.gain.value = fxDryTarget(active);
+      } else if (fxBusRef.current.connectedTo !== output) {
+        // Chain output node changed: rewire the bus outputs to the new node
+        for (const node of fxBusRef.current.outputs) {
+          try { node.disconnect(fxBusRef.current.connectedTo); } catch { /* not connected */ }
+          node.connect(output);
+        }
+        fxBusRef.current.connectedTo = output;
       }
 
       // Remove the direct micGain → broadcastBus connection
@@ -408,6 +678,9 @@ export function useMicEffects(): UseMicEffectsReturn {
         case 'compressor':
           applyCompressorParams(nodeSet, fullParams);
           break;
+        case 'deEsser':
+          applyDeEsserParams(nodeSet, fullParams);
+          break;
         case 'voiceShift':
           applyVoiceShiftParams(nodeSet, fullParams);
           break;
@@ -449,6 +722,9 @@ export function useMicEffects(): UseMicEffectsReturn {
           case 'compressor':
             applyCompressorParams(nodeSet, fullParams);
             break;
+          case 'deEsser':
+            applyDeEsserParams(nodeSet, fullParams);
+            break;
           case 'voiceShift':
             applyVoiceShiftParams(nodeSet, fullParams);
             break;
@@ -465,5 +741,95 @@ export function useMicEffects(): UseMicEffectsReturn {
     rebuildChain();
   }, [rebuildChain]);
 
-  return { effects, toggleEffect, updateEffect, replaceEffects, insertIntoChain, removeFromChain };
+  /**
+   * Hard bypass: reconnect input directly to output (same as all-disabled)
+   * without touching the enabled flags, so releasing bypass restores the
+   * chain instantly. Safe to toggle rapidly (hold-to-compare).
+   */
+  const setBypassed = useCallback(
+    (b: boolean) => {
+      if (bypassedRef.current === b) return;
+      bypassedRef.current = b;
+      setBypassedState(b);
+      rebuildChain();
+    },
+    [rebuildChain],
+  );
+
+  const getMeterState = useCallback((): { reductionDb: number; gateOpen: boolean } => {
+    const state = audioStateRef.current;
+    const nodes = effectNodesRef.current;
+
+    let reductionDb = 0;
+    if (nodes && state.compressor.enabled && !bypassedRef.current) {
+      reductionDb = (nodes.compressor.internals.compressor as DynamicsCompressorNode).reduction;
+    }
+
+    // When enhance is off (or the chain is bypassed) nothing is gating,
+    // so the gate reads as open
+    const gateOpen = !state.enhance.enabled || bypassedRef.current ? true : gateOpenRef.current;
+
+    return { reductionDb, gateOpen };
+  }, []);
+
+  /** Ramp the dry path to the combined crossfade level of the held FX */
+  const updateFxDryGain = useCallback(() => {
+    const bus = fxBusRef.current;
+    const ctx = ctxRef.current;
+    if (!bus || !ctx) return;
+    rampParam(bus.dryGain.gain, ctx, fxDryTarget(activeFxRef.current), FX_ATTACK_SEC);
+  }, []);
+
+  const triggerFx = useCallback(
+    (name: FxName) => {
+      if (activeFxRef.current[name]) return;
+      const next = { ...activeFxRef.current, [name]: true };
+      activeFxRef.current = next;
+      setActiveFx(next);
+
+      const bus = fxBusRef.current;
+      const ctx = ctxRef.current;
+      if (bus && ctx) {
+        rampParam(bus.sends[name].gain, ctx, 1, FX_ATTACK_SEC);
+      }
+      updateFxDryGain();
+    },
+    [updateFxDryGain],
+  );
+
+  const releaseFx = useCallback(
+    (name: FxName) => {
+      if (!activeFxRef.current[name]) return;
+      const next = { ...activeFxRef.current, [name]: false };
+      activeFxRef.current = next;
+      setActiveFx(next);
+
+      const bus = fxBusRef.current;
+      const ctx = ctxRef.current;
+      if (bus && ctx) {
+        // Only the send ramps down; delay feedback and reverb tails keep
+        // ringing through the wet return. radioVoice and pitchDrop have no
+        // tail, so they restore near-instantly.
+        const releaseSec = name === 'radioVoice' || name === 'pitchDrop' ? FX_ATTACK_SEC : FX_RELEASE_SEC;
+        rampParam(bus.sends[name].gain, ctx, 0, releaseSec);
+      }
+      updateFxDryGain();
+    },
+    [updateFxDryGain],
+  );
+
+  return {
+    effects,
+    toggleEffect,
+    updateEffect,
+    replaceEffects,
+    insertIntoChain,
+    removeFromChain,
+    bypassed,
+    setBypassed,
+    getMeterState,
+    activeFx,
+    triggerFx,
+    releaseFx,
+  };
 }

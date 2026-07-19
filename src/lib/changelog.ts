@@ -12,6 +12,39 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    date: '2026-07-18',
+    version: '0.6.0',
+    items: [
+      'Redesigned broadcaster console: two-column layout with a persistent transport bar, always-visible mixer, and tabbed side panel (Sounds, Effects, Tracks, Log)',
+      'Listener volume control: in-app volume slider and mute on the receiver page, remembered between visits',
+      'Now Playing hero on the listener page with large album art and a plain-language connection status ("Streaming well"), technical stats behind a disclosure',
+      'Copy the receive link and the stream link independently from both the broadcaster and receiver pages',
+      'Effects reworked into Voice and FX: hold-to-bypass comparison, live compressor gain-reduction meter, gate open/closed indicator, and a new de-esser',
+      'Momentary FX pads (Radio Voice, Big Room, Slapback, Pitch Drop) with hold-to-apply, tap-to-latch, natural ring-out tails, and Q/W/E/T keys',
+      'Auto-duck: music channels dip automatically under your voice while you speak (per-channel toggle in the mixer)',
+      'Optional ten-second sound check that measures your room and tunes the noise gate and compressor for you',
+      'Sound pad banks (A/B/C), drag-to-reorder, playback progress rings, and keyboard hints on every pad',
+      'User accounts: owners can create DJ and owner accounts from the new admin Users tab, with 24-hour invite links and per-user disable/delete',
+      'Rebuilt admin dashboard: live stats (rooms, listeners, peak, uptime), per-room listener counts, peak, duration, and end-room action',
+      'Auto-identify is back: an ear toggle recognizes songs playing in your broadcast and adds them to the track list (requires an AcoustID key)',
+      'Room-full handoff: when the live room is full, listeners get a built-in player for the MP3 stream instead of a rejection',
+      'Mobile console navigation: bottom tab bar and touch-friendly pan controls',
+    ],
+    fixes: [
+      'Broadcasts, track lists, chat history, and saved URLs now survive server restarts and deploys (SQLite persistence with a mounted volume on Fly.io)',
+      'The Fly.io machine no longer stops while idle, and health checks now watch the server',
+      'Logout now revokes the session server-side; disabling a user kicks them immediately',
+      'The server refuses to start in production with default secrets',
+      'Icecast/Shoutcast streams reconnect automatically with backoff if the external server drops',
+      'Go On Air shows a pending state while the mic is being requested; End Broadcast asks for confirmation',
+      'Deleting pads, presets, and saved URLs now asks for confirmation',
+      'The admin page works in production (it no longer targets a hardcoded dev port)',
+      'Integration streaming migrated off the deprecated ScriptProcessorNode to an AudioWorklet',
+      'Music search endpoints are rate limited; session cookies are marked Secure in production',
+      'Screen-reader support across the console: labels on all icon buttons and a keyboard-accessible pan knob',
+    ],
+  },
+  {
     date: '2026-02-19',
     version: '0.5.0',
     items: [

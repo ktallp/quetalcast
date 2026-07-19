@@ -4,9 +4,12 @@
   "type": "module",
   "scripts": {
     "start": "node index.js",
-    "dev": "node --watch index.js"
+    "dev": "node --watch index.js",
+    "test": "node --test \"test/*.test.js\""
   },
   "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "better-sqlite3": "^12.11.1",
     "cookie-parser": "^1.4.6",
     "express": "^4.21.0",
     "express-rate-limit": "^7.4.0",

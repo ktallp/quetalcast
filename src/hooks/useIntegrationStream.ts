@@ -14,9 +14,13 @@ async function loadLame() {
   return lamejs;
 }
 
+export type RelayStatus = 'connected' | 'reconnecting' | 'failed' | null;
+
 export interface UseIntegrationStreamReturn {
   streaming: boolean;
   error: string | null;
+  /** Server-side relay connection status (auto-reconnect updates) */
+  relayStatus: RelayStatus;
   startStream: (stream: MediaStream, config: IntegrationConfig, roomId?: string | null) => Promise<void>;
   stopStream: () => void;
 }
@@ -30,10 +34,12 @@ const WS_URL = import.meta.env.VITE_WS_URL || (
 export function useIntegrationStream(): UseIntegrationStreamReturn {
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [relayStatus, setRelayStatus] = useState<RelayStatus>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const ctxRef = useRef<AudioContext | null>(null);
-  const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const workletRef = useRef<AudioWorkletNode | null>(null);
+  const silentGainRef = useRef<GainNode | null>(null);
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const chunkCountRef = useRef(0);
   const flowCheckTimerRef = useRef<number | null>(null);
@@ -46,10 +52,14 @@ export function useIntegrationStream(): UseIntegrationStreamReturn {
     chunkCountRef.current = 0;
 
     // Clean up audio processing
-    if (processorRef.current) {
-      processorRef.current.disconnect();
-      processorRef.current.onaudioprocess = null;
-      processorRef.current = null;
+    if (workletRef.current) {
+      workletRef.current.port.onmessage = null;
+      workletRef.current.disconnect();
+      workletRef.current = null;
+    }
+    if (silentGainRef.current) {
+      silentGainRef.current.disconnect();
+      silentGainRef.current = null;
     }
     if (sourceRef.current) {
       sourceRef.current.disconnect();
@@ -69,10 +79,12 @@ export function useIntegrationStream(): UseIntegrationStreamReturn {
     }
 
     setStreaming(false);
+    setRelayStatus(null);
   }, []);
 
   const startStream = useCallback(async (stream: MediaStream, config: IntegrationConfig, roomId?: string | null) => {
     setError(null);
+    setRelayStatus(null);
 
     const integration = getIntegration(config.integrationId);
     if (!integration) {
@@ -90,7 +102,6 @@ export function useIntegrationStream(): UseIntegrationStreamReturn {
       wsRef.current = ws;
 
       await new Promise<void>((resolve, reject) => {
-        ws.onopen = () => resolve();
         ws.onerror = () => reject(new Error('WebSocket connection failed'));
         const timeout = setTimeout(() => reject(new Error('WebSocket connection timeout')), 10000);
         ws.onopen = () => { clearTimeout(timeout); resolve(); };
@@ -98,7 +109,7 @@ export function useIntegrationStream(): UseIntegrationStreamReturn {
 
       const quality = config.streamQuality || DEFAULT_STREAM_QUALITY;
 
-      // Send integration config as first message (include roomId for metadata updates + stream quality for headers)
+      // Send integration config as first message
       ws.send(JSON.stringify({
         type: integration.type,
         credentials: config.credentials,
@@ -129,23 +140,47 @@ export function useIntegrationStream(): UseIntegrationStreamReturn {
         return;
       }
 
-      // Set up MP3 encoding pipeline
+      setRelayStatus('connected');
+
+      // After the ack, the server sends { type: 'status' } frames when the
+      // external connection drops and the auto-reconnect kicks in.
+      ws.onmessage = (ev: MessageEvent) => {
+        if (typeof ev.data !== 'string') return;
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.type === 'status' && typeof msg.state === 'string') {
+            if (msg.state === 'connected') setRelayStatus('connected');
+            else if (msg.state === 'reconnecting') setRelayStatus('reconnecting');
+            else if (msg.state === 'failed') {
+              setRelayStatus('failed');
+              setError('Lost connection to the streaming server and could not reconnect');
+            }
+          }
+        } catch { /* ignore non-JSON */ }
+      };
+
+      // Set up MP3 encoding pipeline: AudioWorklet capture + lamejs encode
       const numChannels = quality.channels;
       const bitrate = quality.bitrate;
       const ctx = new AudioContext({ sampleRate: 44100 });
       ctxRef.current = ctx;
       await ctx.resume();
       if (ctx.state !== 'running') {
-        throw new Error('Audio engine is suspended — interact with the page and try again');
+        throw new Error('Audio engine is suspended. Interact with the page and try again.');
       }
+
+      await ctx.audioWorklet.addModule('/pcm-capture-processor.js');
 
       const source = ctx.createMediaStreamSource(stream);
       sourceRef.current = source;
 
-      // ScriptProcessor: match channel count to encoding mode
-      const bufferSize = 4096;
-      const processor = ctx.createScriptProcessor(bufferSize, numChannels, numChannels);
-      processorRef.current = processor;
+      const worklet = new AudioWorkletNode(ctx, 'pcm-capture-processor', {
+        numberOfInputs: 1,
+        numberOfOutputs: 1,
+        channelCount: 2,
+        channelCountMode: 'clamped-max',
+      });
+      workletRef.current = worklet;
 
       // lamejs MP3 encoder
       const mp3Encoder = new lame.Mp3Encoder(numChannels, 44100, bitrate);
@@ -175,19 +210,18 @@ export function useIntegrationStream(): UseIntegrationStreamReturn {
         return samples;
       };
 
-      processor.onaudioprocess = (e: AudioProcessingEvent) => {
+      worklet.port.onmessage = (e: MessageEvent) => {
+        if (e.data?.type !== 'pcm') return;
         if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
 
+        const channels = e.data.channels as Float32Array[];
         let mp3buf: Uint8Array;
         if (numChannels === 2) {
-          const left = floatToInt16(e.inputBuffer.getChannelData(0));
-          const right = e.inputBuffer.numberOfChannels >= 2
-            ? floatToInt16(e.inputBuffer.getChannelData(1))
-            : left;
+          const left = floatToInt16(channels[0]);
+          const right = channels.length > 1 ? floatToInt16(channels[1]) : left;
           mp3buf = mp3Encoder.encodeBuffer(left, right);
         } else {
-          const samples = floatToInt16(e.inputBuffer.getChannelData(0));
-          mp3buf = mp3Encoder.encodeBuffer(samples);
+          mp3buf = mp3Encoder.encodeBuffer(floatToInt16(channels[0]));
         }
 
         if (mp3buf.length > 0) {
@@ -196,8 +230,13 @@ export function useIntegrationStream(): UseIntegrationStreamReturn {
         }
       };
 
-      source.connect(processor);
-      processor.connect(ctx.destination); // ScriptProcessor needs to be connected to work
+      // Keep the worklet in the rendering graph via a silent gain
+      const silentGain = ctx.createGain();
+      silentGain.gain.value = 0;
+      silentGainRef.current = silentGain;
+      source.connect(worklet);
+      worklet.connect(silentGain);
+      silentGain.connect(ctx.destination);
 
       // Fail fast if no encoded frames are produced after startup.
       flowCheckTimerRef.current = window.setTimeout(() => {
@@ -212,7 +251,7 @@ export function useIntegrationStream(): UseIntegrationStreamReturn {
         stopStream();
       };
       ws.onerror = () => {
-        setError('WebSocket error — stream disconnected');
+        setError('WebSocket error. Stream disconnected.');
         stopStream();
       };
 
@@ -224,5 +263,5 @@ export function useIntegrationStream(): UseIntegrationStreamReturn {
     }
   }, [stopStream]);
 
-  return { streaming, error, startStream, stopStream };
+  return { streaming, error, relayStatus, startStream, stopStream };
 }

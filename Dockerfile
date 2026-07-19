@@ -15,8 +15,9 @@ RUN pnpm run build
 FROM node:20-alpine
 WORKDIR /app
 
-# Install fpcalc (Chromaprint) for audio fingerprinting and ffmpeg for audio conversion
-RUN apk add --no-cache chromaprint ffmpeg
+# Install fpcalc (Chromaprint) for audio fingerprinting and ffmpeg for audio conversion.
+# python3/make/g++ are needed to build the better-sqlite3 native module on Alpine.
+RUN apk add --no-cache chromaprint ffmpeg python3 make g++
 
 # Install pnpm
 RUN corepack enable && corepack prepare pnpm@10 --activate
@@ -31,6 +32,10 @@ COPY server/ ./server/
 # Copy built frontend from build stage
 COPY --from=build /app/dist ./dist
 
+# App version for /health
+COPY VERSION ./VERSION
+
+ENV NODE_ENV=production
 ENV PORT=8080
 EXPOSE 8080
 

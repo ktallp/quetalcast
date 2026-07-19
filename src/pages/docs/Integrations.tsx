@@ -15,6 +15,11 @@ export default function DocsIntegrations() {
           Playing metadata is automatically forwarded to the external server's admin API so
           listeners on those platforms can see what's playing too.
         </p>
+        <p className="mt-2">
+          If the external Icecast/Shoutcast server drops mid-broadcast, the stream reconnects
+          automatically with increasing delays. The event log shows when it's reconnecting and
+          when the stream is back; only a hard failure (like wrong credentials) ends the stream.
+        </p>
 
         <h3 className="text-base font-semibold text-foreground mt-6 mb-2">Stream quality</h3>
         <p>
@@ -27,14 +32,14 @@ export default function DocsIntegrations() {
         <h3 className="text-base font-semibold text-foreground mt-6 mb-2">Stream URL</h3>
         <p>
           When an integration is active, receivers see a <strong>Stream URL</strong> on the receiver
-          page — this is the direct Icecast/Shoutcast listener URL. Copy it and paste into:
+          page: this is the direct Icecast/Shoutcast listener URL. Copy it and paste into:
         </p>
         <ul className="list-disc list-inside mt-2 space-y-1 pl-1">
           <li>
-            <strong>RadioDJ</strong> — Options → Track Import → Track Type: Internet Stream → paste the URL
+            <strong>RadioDJ</strong>: Options → Track Import → Track Type: Internet Stream → paste the URL
           </li>
           <li>
-            <strong>VLC</strong> — Media → Open Network Stream → paste the URL
+            <strong>VLC</strong>: Media → Open Network Stream → paste the URL
           </li>
           <li>
             <strong>Any media player</strong> that accepts standard HTTP audio streams
@@ -56,15 +61,15 @@ export default function DocsIntegrations() {
         </p>
         <ul className="list-disc list-inside mt-2 space-y-1 pl-1">
           <li>
-            <strong>Mount point</strong> — The default is <code>/stream</code>. Use <code>/stream.mp3</code> for best
+            <strong>Mount point</strong>: The default is <code>/stream</code>. Use <code>/stream.mp3</code> for best
             compatibility. Enter the exact mount from your control panel; listeners must connect to the same path.
           </li>
           <li>
-            <strong>AutoDJ</strong> — If AutoDJ is running on the mount point, stop it before going live, or ensure
+            <strong>AutoDJ</strong>: If AutoDJ is running on the mount point, stop it before going live, or ensure
             source override is enabled so your live stream takes priority.
           </li>
           <li>
-            <strong>Source password</strong> — Use the administrator/source password from Settings → Stream.
+            <strong>Source password</strong>: Use the administrator/source password from Settings → Stream.
           </li>
         </ul>
       </section>
@@ -78,8 +83,8 @@ export default function DocsIntegrations() {
           Icecast-compatible ICY headers. This URL works in:
         </p>
         <ul className="list-disc list-inside mt-2 space-y-1 pl-1">
-          <li><strong>VLC</strong> — Media → Open Network Stream → paste the URL</li>
-          <li><strong>RadioDJ</strong> — Options → Track Import → Internet Stream → paste the URL</li>
+          <li><strong>VLC</strong>: Media → Open Network Stream → paste the URL</li>
+          <li><strong>RadioDJ</strong>: Options → Track Import → Internet Stream → paste the URL</li>
           <li><strong>internet-radio.com</strong> and other platforms that accept HTTP audio streams</li>
           <li><strong>Any media player</strong> that supports MP3 over HTTP</li>
         </ul>
@@ -110,22 +115,26 @@ export default function DocsIntegrations() {
         </p>
         <ul className="list-disc list-inside mt-2 space-y-1 pl-1">
           <li>
-            <strong>Space</strong> — Toggle mute
+            <strong>Space</strong>: Toggle mute
           </li>
           <li>
-            <strong>R</strong> — Toggle recording
+            <strong>R</strong>: Toggle recording
           </li>
           <li>
-            <strong>L</strong> — Toggle listen
+            <strong>L</strong>: Toggle listen
           </li>
           <li>
-            <strong>C</strong> — Toggle cue mode
+            <strong>C</strong>: Toggle cue mode
           </li>
           <li>
-            <strong>1–9, 0</strong> — Trigger sound pads 1–10
+            <strong>1–9, 0</strong>: Trigger sound pads 1–10 in the active bank
           </li>
           <li>
-            <strong>?</strong> — Show/hide shortcuts reference
+            <strong>Q / W / E / T</strong>: Hold for Radio Voice / Big Room / Slapback / Pitch
+            Drop FX; release to let the tail ring out
+          </li>
+          <li>
+            <strong>?</strong>: Show/hide shortcuts reference
           </li>
         </ul>
         <p className="mt-2">

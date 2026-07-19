@@ -7,6 +7,7 @@ const DOC_NAV = [
   { path: '/docs', label: 'Overview' },
   { path: '/docs/broadcaster', label: 'Broadcaster' },
   { path: '/docs/receiver', label: 'Receiver' },
+  { path: '/docs/admin', label: 'Admin & Users' },
   { path: '/docs/integrations', label: 'Integrations & Shortcuts' },
 ];
 
@@ -61,7 +62,7 @@ export default function DocsLayout() {
           <div className="flex-1 min-h-0">
             <Outlet />
           </div>
-          {/* Footer on mobile when sidebar is hidden — gap above, sticks to bottom when content is short */}
+          {/* Footer on mobile when sidebar is hidden: gap above, sticks to bottom when content is short */}
           <div className="lg:hidden mt-auto pt-8">
             <Footer />
           </div>

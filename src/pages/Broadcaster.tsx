@@ -8,9 +8,11 @@ import { StatusBar } from '@/components/StatusBar';
 import { LevelMeter } from '@/components/LevelMeter';
 import { HealthPanel } from '@/components/HealthPanel';
 import { EventLog, createLogEntry, type LogEntry } from '@/components/EventLog';
-import { Copy, Mic, MicOff, Radio, Headphones, Music, Sparkles, Zap, Plug2, Circle, Square, Keyboard, Monitor, MonitorOff, Download, SlidersHorizontal } from 'lucide-react';
+import {
+  Mic, Radio, Music, Sparkles, Zap, Plug2, Keyboard, Monitor, MonitorOff,
+  Download, SlidersHorizontal, Copy, ListMusic, ScrollText, Ear,
+} from 'lucide-react';
 import { toast } from '@/components/ui/sonner';
-import { Slider } from '@/components/ui/slider';
 import {
   Select,
   SelectContent,
@@ -27,15 +29,22 @@ import { EffectsBoard } from '@/components/EffectsBoard';
 import { Footer } from '@/components/Footer';
 import { ChatPanel } from '@/components/ChatPanel';
 import { IntegrationsSheet } from '@/components/IntegrationsSheet';
-import { useIntegrationStream } from '@/hooks/useIntegrationStream';
+import { useIntegrationStream, type RelayStatus } from '@/hooks/useIntegrationStream';
+import { useAutoIdentify } from '@/hooks/useAutoIdentify';
 import { useRelayStream } from '@/hooks/useRelayStream';
 import { getIntegration, type IntegrationConfig } from '@/lib/integrations';
 import { getPresets, savePreset, deletePreset, type Preset } from '@/lib/presets';
-import { type EffectName, CHAIN_ORDER } from '@/hooks/useMicEffects';
+import { type EffectName } from '@/hooks/useMicEffects';
 import { useRecorder } from '@/hooks/useRecorder';
 import { useKeyboardShortcuts, SHORTCUT_MAP } from '@/hooks/useKeyboardShortcuts';
 import { downloadBroadcastZip } from '@/lib/zip-export';
 import { PreBroadcastModal, type BroadcastSettings } from '@/components/PreBroadcastModal';
+import { TransportBar, formatClock } from '@/components/broadcast/TransportBar';
+import { MixerBoard, type ChannelStripState, type ChannelPatch } from '@/components/broadcast/MixerBoard';
+import { SidePanel } from '@/components/broadcast/SidePanel';
+import { ShareLinks, receiveLinkFor } from '@/components/broadcast/ShareLinks';
+import { ConfirmDialog } from '@/components/ConfirmDialog';
+import { copyText } from '@/lib/clipboard';
 import {
   Dialog,
   DialogContent,
@@ -59,6 +68,9 @@ const WS_URL = import.meta.env.VITE_WS_URL || (
 const BROADCASTER_LAYOUT_STORAGE_KEY = 'quetalcast:broadcaster-layout:v1';
 const ACTIVE_BROADCAST_KEY = 'quetalcast:active-broadcast';
 const API_BASE = import.meta.env.VITE_API_URL || '';
+
+type SideTab = 'sounds' | 'effects' | 'tracks' | 'log';
+
 type PersistedBroadcasterLayout = {
   qualityMode: AudioQuality;
   limiterDb: 0 | -3 | -6 | -12;
@@ -77,9 +89,11 @@ type PersistedBroadcasterLayout = {
   micMonitor: boolean;
   systemMonitor: boolean;
   padsMonitor: boolean;
+  duckPads: boolean;
+  duckSystem: boolean;
+  autoIdentify: boolean;
   selectedDevice: string;
-  boardAccordion: string;
-  boardExpanded: boolean;
+  sideTab: SideTab;
   effects: Record<EffectName, { enabled: boolean; params: Record<string, number> }>;
 };
 
@@ -94,124 +108,6 @@ function readPersistedLayout(): Partial<PersistedBroadcasterLayout> | null {
   }
 }
 
-function PanKnob({
-  value,
-  onChange,
-  disabled = false,
-}: {
-  value: number;
-  onChange: (v: number) => void;
-  disabled?: boolean;
-}) {
-  const clamped = Math.max(-100, Math.min(100, value));
-  const angle = (clamped / 100) * 135;
-  const label = clamped === 0 ? 'C' : clamped < 0 ? `L${Math.abs(clamped)}` : `R${clamped}`;
-  const knobRef = useRef<HTMLDivElement | null>(null);
-  const dragRef = useRef<{ pointerId: number; startX: number; startY: number; startValue: number } | null>(null);
-
-  const nudge = useCallback((delta: number) => {
-    if (disabled) return;
-    onChange(Math.max(-100, Math.min(100, clamped + delta)));
-  }, [disabled, onChange, clamped]);
-
-  return (
-    <div className={`relative flex items-center justify-center w-14 ${disabled ? 'opacity-40' : ''}`}>
-      <span className="absolute -top-4 left-1/2 -translate-x-1/2 text-[10px] font-mono text-muted-foreground">
-        {label}
-      </span>
-      <div
-        ref={knobRef}
-        className={`relative h-10 w-10 rounded-full border border-border/80 bg-gradient-to-b from-secondary to-background shadow-[inset_0_1px_4px_rgba(0,0,0,0.55),0_1px_2px_rgba(0,0,0,0.35)] ${disabled ? '' : 'cursor-grab active:cursor-grabbing'}`}
-        onDoubleClick={() => {
-          if (disabled) return;
-          onChange(0);
-        }}
-        onWheel={(e) => {
-          e.preventDefault();
-          nudge(e.deltaY > 0 ? -3 : 3);
-        }}
-        onPointerDown={(e) => {
-          if (disabled) return;
-          e.preventDefault();
-          dragRef.current = {
-            pointerId: e.pointerId,
-            startX: e.clientX,
-            startY: e.clientY,
-            startValue: clamped,
-          };
-          knobRef.current?.setPointerCapture(e.pointerId);
-        }}
-        onPointerMove={(e) => {
-          const drag = dragRef.current;
-          if (!drag || drag.pointerId !== e.pointerId || disabled) return;
-          const dx = e.clientX - drag.startX;
-          const dy = drag.startY - e.clientY;
-          const next = drag.startValue + (dx + dy) * 0.9;
-          onChange(Math.max(-100, Math.min(100, Math.round(next))));
-        }}
-        onPointerUp={(e) => {
-          if (dragRef.current?.pointerId === e.pointerId) {
-            dragRef.current = null;
-            if (knobRef.current?.hasPointerCapture(e.pointerId)) {
-              knobRef.current.releasePointerCapture(e.pointerId);
-            }
-          }
-        }}
-        onPointerCancel={(e) => {
-          if (dragRef.current?.pointerId === e.pointerId) {
-            dragRef.current = null;
-            if (knobRef.current?.hasPointerCapture(e.pointerId)) {
-              knobRef.current.releasePointerCapture(e.pointerId);
-            }
-          }
-        }}
-      >
-        <div
-          className="absolute left-1/2 top-1/2 h-3.5 w-0.5 -translate-x-1/2 -translate-y-[88%] rounded bg-primary shadow-[0_0_6px_rgba(34,197,94,0.35)]"
-          style={{ transform: `translate(-50%, -88%) rotate(${angle}deg)`, transformOrigin: '50% 150%' }}
-        />
-      </div>
-    </div>
-  );
-}
-
-function VolumeLeds({
-  level,
-  disabled = false,
-}: {
-  level: number;
-  disabled?: boolean;
-}) {
-  const clamped = Math.max(0, Math.min(1, level));
-  const ledCount = 10;
-  const activeCount = disabled ? 0 : Math.round(clamped * ledCount);
-
-  return (
-    <div className={`inline-flex flex-col-reverse items-center gap-0.5 ${disabled ? 'opacity-30' : ''}`} aria-hidden>
-      {Array.from({ length: ledCount }).map((_, i) => {
-        const active = i < activeCount;
-        const tone = i >= 9 ? 'danger' : i >= 7 ? 'warn' : 'safe';
-        const activeClass = tone === 'danger'
-          ? 'bg-red-500/95 border-red-400/80 shadow-[0_0_4px_rgba(239,68,68,0.55)]'
-          : tone === 'warn'
-            ? 'bg-yellow-400/95 border-yellow-300/80 shadow-[0_0_4px_rgba(250,204,21,0.5)]'
-            : 'bg-primary/95 border-primary/70 shadow-[0_0_4px_rgba(34,197,94,0.45)]';
-
-        return (
-          <span
-            key={i}
-            className={`h-1 w-2 rounded-[2px] border ${active ? activeClass : 'bg-muted/25 border-border/40'}`}
-          />
-        );
-      })}
-    </div>
-  );
-}
-
-const MIXER_SLIDER_CLASS = [
-  "flex-1 min-w-0",
-].join(' ');
-
 const Broadcaster = () => {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -220,7 +116,7 @@ const Broadcaster = () => {
   const [selectedDevice, setSelectedDevice] = useState('');
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [isOnAir, setIsOnAir] = useState(false);
-  const [copied, setCopied] = useState(false);
+  const [goingOnAir, setGoingOnAir] = useState(false);
   const [micVolume, setMicVolume] = useState(100);
   const [micMuted, setMicMuted] = useState(false);
   const [micSolo, setMicSolo] = useState(false);
@@ -231,14 +127,15 @@ const Broadcaster = () => {
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [listenerCount, setListenerCount] = useState(0);
   const [nowPlaying, setNowPlaying] = useState('');
-  const [nowPlayingCover, setNowPlayingCover] = useState<string | undefined>();
+  const [, setNowPlayingCover] = useState<string | undefined>();
   const nowPlayingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [trackList, setTrackList] = useState<Track[]>([]);
   const [presets, setPresets] = useState(() => getPresets());
   const [savePresetOpen, setSavePresetOpen] = useState(false);
   const [newPresetName, setNewPresetName] = useState('');
+  const [deletePresetName, setDeletePresetName] = useState<string | null>(null);
   const [qualityMode, setQualityMode] = useState<AudioQuality>('auto');
-  const audioRef = useRef<HTMLAudioElement>(null);
+  const [endConfirmOpen, setEndConfirmOpen] = useState(false);
 
   // Pre-broadcast modal state
   const [preBroadcastOpen, setPreBroadcastOpen] = useState(false);
@@ -268,21 +165,22 @@ const Broadcaster = () => {
   const [micMonitor, setMicMonitor] = useState(false);
   const [systemMonitor, setSystemMonitor] = useState(false);
   const [padsMonitor, setPadsMonitor] = useState(true);
+  const [duckPads, setDuckPads] = useState(false);
+  const [duckSystem, setDuckSystem] = useState(false);
+  const [autoIdentifyAvailable, setAutoIdentifyAvailable] = useState(false);
+  const [autoIdentifyOn, setAutoIdentifyOn] = useState(false);
   const [systemAudioInfoOpen, setSystemAudioInfoOpen] = useState(false);
   const systemAudioStreamRef = useRef<MediaStream | null>(null);
   const [channelLevels, setChannelLevels] = useState({ mic: 0, system: 0, pads: 0 });
 
-  /** Preview stream for level meter when not on air — so user can dial in before going live */
+  /** Preview stream for the level meter when not on air, so levels can be set before going live */
   const [previewStream, setPreviewStream] = useState<MediaStream | null>(null);
 
   const [startBroadcastDialogOpen, setStartBroadcastDialogOpen] = useState(false);
-  const [boardAccordion, setBoardAccordion] = useState<string>('sounds');
-  const [boardExpanded, setBoardExpanded] = useState(true);
-  const lastBoardRef = useRef<'sounds' | 'effects'>('sounds');
-  useEffect(() => {
-    if (boardAccordion) lastBoardRef.current = boardAccordion as 'sounds' | 'effects';
-  }, [boardAccordion]);
-  const boardActive = boardAccordion || lastBoardRef.current;
+  const [sideTab, setSideTab] = useState<SideTab>('sounds');
+
+  const mixerPanelRef = useRef<HTMLDivElement | null>(null);
+  const sidePanelRef = useRef<HTMLDivElement | null>(null);
 
   const addLog = useCallback((msg: string, level: LogEntry['level'] = 'info') => {
     setLogs((prev) => [...prev.slice(-100), createLogEntry(msg, level)]);
@@ -297,7 +195,7 @@ const Broadcaster = () => {
   const levelMeterStream = mixer.mixedStream || previewStream;
   const audioAnalysis = useAudioAnalyser(levelMeterStream);
 
-  // Auth check — verify both local token and server session
+  // Auth check: verify both the local token and the server session
   useEffect(() => {
     if (!isAuthenticated()) {
       navigate('/login');
@@ -308,7 +206,15 @@ const Broadcaster = () => {
     });
   }, [navigate]);
 
-  // Check for recoverable broadcast on mount
+  // Auto-identify availability depends on the server having an AcoustID key
+  useEffect(() => {
+    fetch(`${API_BASE}/api/capabilities`, { credentials: 'include' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => setAutoIdentifyAvailable(Boolean(data?.autoIdentify)))
+      .catch(() => setAutoIdentifyAvailable(false));
+  }, []);
+
+  // Check for a recoverable broadcast on mount
   useEffect(() => {
     const saved = localStorage.getItem(ACTIVE_BROADCAST_KEY);
     if (!saved) return;
@@ -343,13 +249,13 @@ const Broadcaster = () => {
         }
         addLog(`Found ${audioInputs.length} audio input${audioInputs.length !== 1 ? 's' : ''}`);
       } catch (e) {
-        addLog('Couldn\'t find audio devices — check permissions', 'error');
+        addLog('Couldn\'t find audio devices. Check permissions.', 'error');
       }
     }
     getDevices();
   }, [addLog, selectedDevice]);
 
-  // Preview stream for level meter when not on air — user can dial in before going live
+  // Preview stream for level meter when not on air
   const previewStreamRef = useRef<MediaStream | null>(null);
   useEffect(() => {
     if (isOnAir || !selectedDevice) {
@@ -392,8 +298,8 @@ const Broadcaster = () => {
     };
   }, [isOnAir, selectedDevice]);
 
-  // Keep preview mic connected to the mixer while off air so mic gain/mute
-  // affect the level meter consistently (not only when system audio is enabled).
+  // Keep the preview mic connected to the mixer while off air so mic gain/mute
+  // affect the level meter consistently.
   useEffect(() => {
     if (!isOnAir && previewStream) {
       mixer.connectMic(previewStream);
@@ -428,7 +334,6 @@ const Broadcaster = () => {
   }, [mixer]);
 
   // Channel-strip mixer math: if any solo is active, only soloed channels pass.
-  // Top mic mute still hard-mutes the mic channel.
   useEffect(() => {
     const anySolo = micSolo || systemAudioSolo || padsSolo;
     const micAllowed = !anySolo || micSolo;
@@ -478,6 +383,15 @@ const Broadcaster = () => {
     mixer.setPadsMonitor(padsMonitor);
   }, [padsMonitor, mixer]);
 
+  // Sync auto-duck settings to the mixer
+  useEffect(() => {
+    mixer.setDucking('pads', duckPads);
+  }, [duckPads, mixer]);
+
+  useEffect(() => {
+    mixer.setDucking('system', duckSystem);
+  }, [duckSystem, mixer]);
+
   const statusLabels: Record<ConnectionStatus, string> = {
     idle: 'Ready',
     connecting: 'Setting up broadcast…',
@@ -498,18 +412,17 @@ const Broadcaster = () => {
     if (signaling.connected) addLog('Connected to server');
   }, [signaling.connected]);
 
-  // Handle auth errors from signaling — redirect to login
-  // Handle room creation errors (custom URL conflicts, validation)
+  // Handle auth errors and room creation errors from signaling
   useEffect(() => {
     const unsub = signaling.subscribe((msg) => {
       if (msg.type === 'error' && msg.code === 'AUTH_REQUIRED') {
-        addLog('Session expired — please log in again', 'warn');
+        addLog('Session expired. Please log in again.', 'warn');
         localStorage.removeItem('webrtc-bridge-auth');
         setTimeout(() => navigate('/login'), 500);
       }
       if (msg.type === 'error' && (msg.code === 'INVALID_ROOM_ID' || msg.code === 'ROOM_ID_TAKEN')) {
         const errMsg = typeof msg.message === 'string' ? msg.message : 'Invalid room ID';
-        setCustomUrlError(errMsg);
+        toast.error(errMsg);
         addLog(errMsg, 'error');
         setIsOnAir(false);
       }
@@ -542,7 +455,7 @@ const Broadcaster = () => {
     }
   }, [webrtc.status, addLog]);
 
-  // Update URL with room ID when broadcast starts; persist to localStorage for recovery
+  // Update URL with room ID when broadcast starts; persist for recovery
   useEffect(() => {
     if (webrtc.roomId) {
       setSearchParams((prev) => {
@@ -567,40 +480,39 @@ const Broadcaster = () => {
   const recordingAfterBroadcastRef = useRef(false);
   const prevRecordingRef = useRef(false);
 
+  /** Connect the mic and effects chain; shared by go-on-air, continue, and recover flows. */
+  const connectMicForBroadcast = useCallback(async () => {
+    const constraints: MediaStreamConstraints = {
+      audio: {
+        deviceId: selectedDevice ? { exact: selectedDevice } : undefined,
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+        sampleRate: { ideal: 48000 },
+      },
+    };
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    setLocalStream(stream);
+    mixer.connectMic(stream);
+    const nodes = mixer.getNodes();
+    if (nodes) {
+      await micEffects.insertIntoChain(nodes.ctx, nodes.micGain, nodes.micVolumeGain);
+    }
+    mixer.setMicVolume(micVolume / 100);
+    if (micMuted) mixer.setMicMuted(true);
+    addLog('Mic connected');
+  }, [selectedDevice, mixer, micEffects, micVolume, micMuted, addLog]);
+
   const doGoOnAir = useCallback(async () => {
+    setGoingOnAir(true);
     try {
-      // Only stop recording when it's from preview stream (source will be torn down).
-      // When recording from mixer (after broadcast), keep it running into the new broadcast.
+      // Only stop recording when it's from the preview stream (source will be torn down).
       if (recorder.recording && !isOnAir && !recordingAfterBroadcastRef.current) {
         recorder.stopRecording();
-        addLog('Recording stopped — saving MP3 before going on air');
+        addLog('Recording stopped. Saving MP3 before going on air.');
       }
 
-      const constraints: MediaStreamConstraints = {
-        audio: {
-          deviceId: selectedDevice ? { exact: selectedDevice } : undefined,
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
-          sampleRate: { ideal: 48000 },
-        },
-      };
-
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      setLocalStream(stream);
-      mixer.connectMic(stream);
-
-      // Insert effects chain between micGain and micVolumeGain (volume is after effects)
-      const nodes = mixer.getNodes();
-      if (nodes) {
-        await micEffects.insertIntoChain(nodes.ctx, nodes.micGain, nodes.micVolumeGain);
-      }
-
-      // Apply current mic volume (slider may have been changed before going on air)
-      mixer.setMicVolume(micVolume / 100);
-      if (micMuted) mixer.setMicMuted(true);
-
-      addLog('Mic connected');
+      await connectMicForBroadcast();
 
       const settings = pendingBroadcastSettingsRef.current;
       const slug = settings?.customUrl || '';
@@ -617,9 +529,12 @@ const Broadcaster = () => {
       setIsOnAir(true);
       pendingBroadcastSettingsRef.current = null;
     } catch (e) {
-      addLog('Couldn\'t start broadcast — check mic permissions', 'error');
+      addLog('Couldn\'t start broadcast. Check mic permissions.', 'error');
+      toast.error('Couldn\'t start the broadcast. Check mic permissions and try again.');
+    } finally {
+      setGoingOnAir(false);
     }
-  }, [mixer, micEffects, webrtc, selectedIntegration, addLog, micVolume, micMuted, recorder, isOnAir]);
+  }, [connectMicForBroadcast, webrtc, selectedIntegration, addLog, recorder, isOnAir]);
 
   const handleGoOnAir = useCallback(() => {
     const hasTrackList = trackList.length > 0;
@@ -650,7 +565,7 @@ const Broadcaster = () => {
     setPreBroadcastOpen(true);
   }, []);
 
-  /** Continue previous broadcast — rejoin same room, keep logs & track list */
+  /** Continue previous broadcast: rejoin the same room, keep logs and track list */
   const handleContinuePreviousBroadcast = useCallback(async () => {
     const prevRoomId = webrtc.roomId;
     if (!prevRoomId) {
@@ -658,28 +573,9 @@ const Broadcaster = () => {
       return;
     }
     setStartBroadcastDialogOpen(false);
+    setGoingOnAir(true);
     try {
-      // Keep recording running — same mixer, just reconnecting to room
-
-      const constraints: MediaStreamConstraints = {
-        audio: {
-          deviceId: selectedDevice ? { exact: selectedDevice } : undefined,
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
-          sampleRate: { ideal: 48000 },
-        },
-      };
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      setLocalStream(stream);
-      mixer.connectMic(stream);
-      const nodes = mixer.getNodes();
-      if (nodes) {
-        await micEffects.insertIntoChain(nodes.ctx, nodes.micGain, nodes.micVolumeGain);
-      }
-      mixer.setMicVolume(micVolume / 100);
-      if (micMuted) mixer.setMicMuted(true);
-      addLog('Mic connected');
+      await connectMicForBroadcast();
       addLog('Resuming previous broadcast…');
       webrtc.joinRoomAsBroadcaster(prevRoomId);
       broadcastStartedRef.current = false;
@@ -689,33 +585,18 @@ const Broadcaster = () => {
       }
       setIsOnAir(true);
     } catch (e) {
-      addLog('Couldn\'t resume broadcast — check mic permissions', 'error');
+      addLog('Couldn\'t resume broadcast. Check mic permissions.', 'error');
+    } finally {
+      setGoingOnAir(false);
     }
-  }, [mixer, micEffects, webrtc, selectedDevice, selectedIntegration, addLog, micVolume, micMuted]);
+  }, [connectMicForBroadcast, webrtc, selectedIntegration, addLog, doGoOnAir]);
 
   const handleRecoverBroadcast = useCallback(async () => {
     if (!recoveryRoomId) return;
     setRecoveryDialogOpen(false);
+    setGoingOnAir(true);
     try {
-      const constraints: MediaStreamConstraints = {
-        audio: {
-          deviceId: selectedDevice ? { exact: selectedDevice } : undefined,
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
-          sampleRate: { ideal: 48000 },
-        },
-      };
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      setLocalStream(stream);
-      mixer.connectMic(stream);
-      const nodes = mixer.getNodes();
-      if (nodes) {
-        await micEffects.insertIntoChain(nodes.ctx, nodes.micGain, nodes.micVolumeGain);
-      }
-      mixer.setMicVolume(micVolume / 100);
-      if (micMuted) mixer.setMicMuted(true);
-      addLog('Mic connected');
+      await connectMicForBroadcast();
       addLog('Recovering previous broadcast…');
       webrtc.joinRoomAsBroadcaster(recoveryRoomId);
       broadcastStartedRef.current = false;
@@ -725,11 +606,13 @@ const Broadcaster = () => {
       }
       setIsOnAir(true);
     } catch (e) {
-      addLog('Couldn\'t recover broadcast — check mic permissions', 'error');
+      addLog('Couldn\'t recover broadcast. Check mic permissions.', 'error');
       localStorage.removeItem(ACTIVE_BROADCAST_KEY);
+    } finally {
+      setGoingOnAir(false);
     }
     setRecoveryRoomId(null);
-  }, [recoveryRoomId, mixer, micEffects, webrtc, selectedDevice, selectedIntegration, addLog, micVolume, micMuted]);
+  }, [recoveryRoomId, connectMicForBroadcast, webrtc, selectedIntegration, addLog]);
 
   const handleDismissRecovery = useCallback(() => {
     setRecoveryDialogOpen(false);
@@ -767,13 +650,13 @@ const Broadcaster = () => {
     }
   }, [isOnAir, selectedIntegration, mixer.mixedStream, integrationStream, addLog]);
 
-  // Start relay stream for built-in /stream/:roomId (always, for VLC/RadioDJ)
+  // Start relay stream for the built-in /stream/:roomId (always, for VLC/RadioDJ)
   const relayStartedRef = useRef(false);
   useEffect(() => {
     if (isOnAir && mixer.mixedStream && webrtc.roomId && !relayStartedRef.current) {
       relayStartedRef.current = true;
       relayStream.startRelay(mixer.mixedStream, webrtc.roomId).catch(() => {
-        // Non-fatal — WebRTC broadcast still works without the relay
+        // Non-fatal: the WebRTC broadcast still works without the relay
       });
     }
     if (!isOnAir) {
@@ -787,6 +670,31 @@ const Broadcaster = () => {
       addLog(`Stream relay: ${relayStream.error}`, 'warn');
     }
   }, [relayStream.error, addLog]);
+
+  // Surface integration relay reconnect status
+  const prevRelayStatusRef = useRef<RelayStatus>(null);
+  useEffect(() => {
+    const prev = prevRelayStatusRef.current;
+    prevRelayStatusRef.current = integrationStream.relayStatus;
+    if (integrationStream.relayStatus === 'reconnecting' && prev !== 'reconnecting') {
+      addLog('Streaming server connection lost. Reconnecting…', 'warn');
+    }
+    if (integrationStream.relayStatus === 'connected' && prev === 'reconnecting') {
+      addLog('Reconnected to streaming server');
+    }
+  }, [integrationStream.relayStatus, addLog]);
+
+  // Auto-identify: fingerprint the broadcast and add recognized songs to the track list
+  useAutoIdentify({
+    stream: isOnAir && autoIdentifyOn ? mixer.mixedStream : null,
+    enabled: isOnAir && autoIdentifyOn && autoIdentifyAvailable,
+    existingTitles: trackList.map((t) => t.title),
+    onMatch: (match) => {
+      const text = `${match.artist} - ${match.title}`;
+      signaling.send({ type: 'add-track', text, artist: match.artist, trackTitle: match.title });
+      addLog(`Auto-identified: ${text}`);
+    },
+  });
 
   useEffect(() => {
     if (integrationStream.error) {
@@ -812,7 +720,7 @@ const Broadcaster = () => {
     }
   }, [recorder.recording, micEffects, mixer, localStream, systemAudioActive]);
 
-  const handleEndBroadcast = () => {
+  const handleEndBroadcast = useCallback(() => {
     const wasRecording = recorder.recording;
 
     // If recording, keep mixer/mic connected so recording continues until user stops
@@ -829,7 +737,7 @@ const Broadcaster = () => {
       }
     } else {
       recordingAfterBroadcastRef.current = true;
-      addLog('Recording continues — stop when ready or start a new broadcast');
+      addLog('Recording continues. Stop when ready or start a new broadcast.');
     }
 
     webrtc.stop();
@@ -841,13 +749,9 @@ const Broadcaster = () => {
     setIsOnAir(false);
     localStorage.removeItem(ACTIVE_BROADCAST_KEY);
     addLog('Off air');
-  };
+  }, [recorder.recording, micEffects, localStream, mixer, systemAudioActive, webrtc, selectedIntegration, integrationStream, relayStream, addLog]);
 
   // --- Mixer control handlers ---
-
-  const handleMicVolumeChange = (v: number) => {
-    setMicVolume(v);
-  };
 
   const handleToggleMute = () => {
     const newMuted = !micMuted;
@@ -870,14 +774,12 @@ const Broadcaster = () => {
     setCueMode(newCue);
     mixer.setCueMode(newCue);
     if (newCue) {
-      // Cue on → auto-enable listen
       setListening(true);
-      addLog('Cue mode on — previewing locally');
+      addLog('Cue mode on. Previewing locally.');
     } else {
-      // Cue off → auto-disable listen
       setListening(false);
       mixer.setListening(false);
-      addLog('Cue mode off — back on air');
+      addLog('Cue mode off. Back on air.');
     }
   };
 
@@ -887,7 +789,7 @@ const Broadcaster = () => {
     webrtc.setAudioQuality(q);
     const labels: Record<AudioQuality, string> = {
       high: 'High quality (510 kbps stereo)',
-      auto: 'Auto quality — adapts to connection health',
+      auto: 'Auto quality: adapts to connection health',
       low: 'Low bandwidth (32 kbps mono)',
     };
     addLog(labels[q]);
@@ -896,7 +798,7 @@ const Broadcaster = () => {
   const handleToggleRecording = async () => {
     if (recorder.recording) {
       recorder.stopRecording();
-      addLog('Recording stopped — saving MP3');
+      addLog('Recording stopped. Saving MP3.');
     } else {
       const stream = isOnAir ? mixer.mixedStream : previewStream;
       if (stream) {
@@ -917,17 +819,7 @@ const Broadcaster = () => {
   };
 
   const handleApplyPreset = (preset: Preset) => {
-    for (const effectName of CHAIN_ORDER) {
-      const effectState = preset.effects[effectName];
-      if (effectState) {
-        if (micEffects.effects[effectName].enabled !== effectState.enabled) {
-          micEffects.toggleEffect(effectName);
-        }
-        for (const [param, value] of Object.entries(effectState.params)) {
-          micEffects.updateEffect(effectName, param, value);
-        }
-      }
-    }
+    micEffects.replaceEffects(preset.effects);
     addLog(`Preset loaded: ${preset.name}`);
   };
 
@@ -955,7 +847,7 @@ const Broadcaster = () => {
     // Debounce sending metadata
     if (nowPlayingTimerRef.current) clearTimeout(nowPlayingTimerRef.current);
     nowPlayingTimerRef.current = setTimeout(() => {
-      const payload: Record<string, string> = { type: 'metadata', text: meta.text };
+      const payload: { type: string; [key: string]: string } = { type: 'metadata', text: meta.text };
       if (meta.cover) payload.cover = meta.cover;
       signaling.send(payload);
     }, 500);
@@ -970,20 +862,17 @@ const Broadcaster = () => {
 
   const handleToggleSystemAudio = () => {
     if (systemAudioActive) {
-      // Stop system audio capture
       mixer.disconnectSystemAudio();
       systemAudioStreamRef.current = null;
       setSystemAudioActive(false);
-      // If we connected mic for prep (not on air), disconnect it
       if (!isOnAir) {
         micEffects.removeFromChain();
         mixer.disconnectMic();
-        addLog('System audio stopped — mic disconnected from mixer');
+        addLog('System audio stopped. Mic disconnected from mixer.');
       } else {
         addLog('System audio stopped');
       }
     } else {
-      // Show the info modal first
       setSystemAudioInfoOpen(true);
     }
   };
@@ -991,7 +880,7 @@ const Broadcaster = () => {
   const handleSystemAudioConfirm = async () => {
     setSystemAudioInfoOpen(false);
     try {
-      // When not on air, connect mic and effects so we can prep the full mix
+      // When not on air, connect mic and effects so the full mix can be prepped
       if (!isOnAir && previewStream) {
         mixer.connectMic(previewStream);
         const nodes = mixer.getNodes();
@@ -1006,11 +895,9 @@ const Broadcaster = () => {
       // Request system audio via getDisplayMedia.
       // Video is required by browsers, but we request the absolute minimum
       // (1x1 @ 1fps) to avoid GPU/CPU overhead from screen capture encoding.
-      // systemAudio: 'include' hints Chrome to offer system audio capture.
       const stream = await navigator.mediaDevices.getDisplayMedia({
         audio: {
           suppressLocalAudioPlayback: false,
-          // @ts-expect-error — Chrome 105+ systemAudio hint
           systemAudio: 'include',
         },
         video: {
@@ -1018,12 +905,11 @@ const Broadcaster = () => {
           height: { ideal: 1 },
           frameRate: { ideal: 1 },
         },
-        // @ts-expect-error — Chrome hints: show entire screen option, exclude current tab
         monitorTypeSurfaces: 'include',
         selfBrowserSurface: 'exclude',
       } as DisplayMediaStreamOptions);
 
-      // Stop the video track immediately — we only need audio
+      // Stop the video track immediately: only the audio is needed
       stream.getVideoTracks().forEach(t => t.stop());
 
       const audioTracks = stream.getAudioTracks();
@@ -1033,7 +919,6 @@ const Broadcaster = () => {
         return;
       }
 
-      // Create a new stream with only the audio track
       const audioOnlyStream = new MediaStream(audioTracks);
 
       mixer.connectSystemAudio(audioOnlyStream);
@@ -1041,7 +926,6 @@ const Broadcaster = () => {
       setSystemAudioActive(true);
       addLog('System audio connected');
 
-      // Listen for the track ending (user clicks "Stop sharing" in browser chrome)
       audioTracks[0].addEventListener('ended', () => {
         systemAudioStreamRef.current = null;
         setSystemAudioActive(false);
@@ -1053,7 +937,7 @@ const Broadcaster = () => {
       });
     } catch (e: unknown) {
       if (e instanceof Error && e.name === 'NotAllowedError') {
-        // User cancelled the picker — not an error
+        // User cancelled the picker; not an error
         return;
       }
       addLog('Failed to capture system audio', 'error');
@@ -1061,20 +945,18 @@ const Broadcaster = () => {
     }
   };
 
-  const handleSystemAudioVolumeChange = (v: number) => {
-    setSystemAudioVolume(v);
-  };
-
-  // Keyboard shortcuts
+  // Keyboard shortcuts (momentary FX keys are handled by the effects engine)
   const { showHelp, setShowHelp } = useKeyboardShortcuts(isOnAir, {
     onToggleMute: handleToggleMute,
     onToggleRecording: handleToggleRecording,
     onToggleListen: handleToggleListen,
     onToggleCue: handleToggleCue,
     onTriggerPad: (index: number) => soundboardTriggerRef.current?.(index),
+    onFxDown: (name) => micEffects.triggerFx(name),
+    onFxUp: (name) => micEffects.releaseFx(name),
   });
 
-  // Reset volatile display state when going off air (keep persisted layout controls).
+  // Reset volatile display state when going off air
   useEffect(() => {
     if (!isOnAir) {
       setListening(false);
@@ -1093,24 +975,6 @@ const Broadcaster = () => {
     const interval = setInterval(() => setElapsedSeconds((s) => s + 1), 1000);
     return () => clearInterval(interval);
   }, [isOnAir]);
-
-  const formatTime = (totalSeconds: number) => {
-    const h = Math.floor(totalSeconds / 3600);
-    const m = Math.floor((totalSeconds % 3600) / 60);
-    const s = totalSeconds % 60;
-    const pad = (n: number) => n.toString().padStart(2, '0');
-    return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
-  };
-
-  const copyReceiverLink = () => {
-    if (webrtc.roomId) {
-      const link = `${window.location.origin}/receive/${webrtc.roomId}`;
-      navigator.clipboard.writeText(link);
-      setCopied(true);
-      addLog('Receiver link copied');
-      setTimeout(() => setCopied(false), 2000);
-    }
-  };
 
   const integrationInfo = selectedIntegration ? getIntegration(selectedIntegration.integrationId) : null;
 
@@ -1148,9 +1012,13 @@ const Broadcaster = () => {
     if (typeof saved.micMonitor === 'boolean') setMicMonitor(saved.micMonitor);
     if (typeof saved.systemMonitor === 'boolean') setSystemMonitor(saved.systemMonitor);
     if (typeof saved.padsMonitor === 'boolean') setPadsMonitor(saved.padsMonitor);
+    if (typeof saved.duckPads === 'boolean') setDuckPads(saved.duckPads);
+    if (typeof saved.duckSystem === 'boolean') setDuckSystem(saved.duckSystem);
+    if (typeof saved.autoIdentify === 'boolean') setAutoIdentifyOn(saved.autoIdentify);
 
-    if (typeof saved.boardExpanded === 'boolean') setBoardExpanded(saved.boardExpanded);
-    if (typeof saved.boardAccordion === 'string' && saved.boardAccordion) setBoardAccordion(saved.boardAccordion);
+    if (saved.sideTab && ['sounds', 'effects', 'tracks', 'log'].includes(saved.sideTab)) {
+      setSideTab(saved.sideTab);
+    }
 
     if (saved.effects) {
       micEffects.replaceEffects(saved.effects);
@@ -1176,9 +1044,11 @@ const Broadcaster = () => {
       micMonitor,
       systemMonitor,
       padsMonitor,
+      duckPads,
+      duckSystem,
+      autoIdentify: autoIdentifyOn,
       selectedDevice,
-      boardAccordion,
-      boardExpanded,
+      sideTab,
       effects: micEffects.effects,
     };
     try {
@@ -1204,11 +1074,88 @@ const Broadcaster = () => {
     micMonitor,
     systemMonitor,
     padsMonitor,
+    duckPads,
+    duckSystem,
+    autoIdentifyOn,
     selectedDevice,
-    boardAccordion,
-    boardExpanded,
+    sideTab,
     micEffects.effects,
   ]);
+
+  const channelStates: ChannelStripState[] = [
+    {
+      id: 'mic',
+      label: 'Mic',
+      level: channelLevels.mic,
+      volume: micVolume,
+      muted: micMuted,
+      solo: micSolo,
+      pan: micPan,
+      monitor: micMonitor,
+      active: true,
+    },
+    {
+      id: 'pads',
+      label: 'Sound Pads',
+      level: channelLevels.pads,
+      volume: padsVolume,
+      muted: padsMuted,
+      solo: padsSolo,
+      pan: padsPan,
+      monitor: padsMonitor,
+      active: true,
+      duckable: true,
+      duck: duckPads,
+    },
+    {
+      id: 'system',
+      label: 'System Audio',
+      level: channelLevels.system,
+      volume: systemAudioVolume,
+      muted: systemAudioMuted,
+      solo: systemAudioSolo,
+      pan: systemAudioPan,
+      monitor: systemMonitor,
+      active: systemAudioActive,
+      duckable: true,
+      duck: duckSystem,
+    },
+  ];
+
+  const handleChannelChange = (id: ChannelStripState['id'], patch: ChannelPatch) => {
+    const map = {
+      mic: {
+        volume: setMicVolume, muted: setMicMuted, solo: setMicSolo, pan: setMicPan, monitor: setMicMonitor,
+        duck: undefined as ((v: boolean) => void) | undefined,
+      },
+      pads: {
+        volume: setPadsVolume, muted: setPadsMuted, solo: setPadsSolo, pan: setPadsPan, monitor: setPadsMonitor,
+        duck: setDuckPads,
+      },
+      system: {
+        volume: setSystemAudioVolume, muted: setSystemAudioMuted, solo: setSystemAudioSolo, pan: setSystemAudioPan, monitor: setSystemMonitor,
+        duck: setDuckSystem,
+      },
+    }[id];
+    if (patch.volume !== undefined) map.volume(patch.volume);
+    if (patch.muted !== undefined) map.muted(patch.muted);
+    if (patch.solo !== undefined) map.solo(patch.solo);
+    if (patch.pan !== undefined) map.pan(patch.pan);
+    if (patch.monitor !== undefined) map.monitor(patch.monitor);
+    if (patch.duck !== undefined) map.duck?.(patch.duck);
+  };
+
+  const scrollToPanel = (ref: React.RefObject<HTMLDivElement>) => {
+    ref.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
+  const mobileNavItems: Array<{ id: string; label: string; icon: typeof Music; onSelect: () => void; active: boolean }> = [
+    { id: 'mix', label: 'Mix', icon: SlidersHorizontal, onSelect: () => scrollToPanel(mixerPanelRef), active: false },
+    { id: 'sounds', label: 'Pads', icon: Music, onSelect: () => { setSideTab('sounds'); scrollToPanel(sidePanelRef); }, active: sideTab === 'sounds' },
+    { id: 'effects', label: 'FX', icon: Sparkles, onSelect: () => { setSideTab('effects'); scrollToPanel(sidePanelRef); }, active: sideTab === 'effects' },
+    { id: 'tracks', label: 'Tracks', icon: ListMusic, onSelect: () => { setSideTab('tracks'); scrollToPanel(sidePanelRef); }, active: sideTab === 'tracks' },
+    { id: 'log', label: 'Log', icon: ScrollText, onSelect: () => { setSideTab('log'); scrollToPanel(sidePanelRef); }, active: sideTab === 'log' },
+  ];
 
   return (
     <div className="min-h-[100dvh] bg-background flex flex-col">
@@ -1216,27 +1163,47 @@ const Broadcaster = () => {
         status={selectedIntegration && isOnAir ? 'on-air' : webrtc.status}
         roomId={isOnAir ? webrtc.roomId : null}
         integrationName={isOnAir && integrationInfo ? integrationInfo.name : undefined}
+        listenerCount={isOnAir ? listenerCount : undefined}
+        elapsedSeconds={isOnAir ? elapsedSeconds : undefined}
+        recording={recorder.recording}
+        recordElapsed={recorder.elapsed}
       />
 
-      <div className="flex-1 p-4 max-w-4xl mx-auto w-full space-y-4">
+      <div className="flex-1 p-4 pb-16 lg:pb-4 max-w-6xl mx-auto w-full space-y-4">
         {/* Header */}
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-2 flex-wrap">
           <div className="flex items-center gap-2">
             <h1 className="text-lg font-semibold text-foreground flex items-center gap-2">
-              <Radio className="h-5 w-5 text-primary" />
+              <Radio className="h-5 w-5 text-primary" aria-hidden />
               Broadcaster
             </h1>
-            {isOnAir && (
+            <button
+              onClick={() => setShowHelp(true)}
+              className="text-muted-foreground/40 hover:text-muted-foreground transition-colors"
+              title="Keyboard shortcuts"
+              aria-label="Show keyboard shortcuts"
+            >
+              <Keyboard className="h-4 w-4" aria-hidden />
+            </button>
+            {autoIdentifyAvailable && (
               <button
-                onClick={() => setShowHelp(true)}
-                className="text-muted-foreground/40 hover:text-muted-foreground transition-colors"
-                title="Keyboard shortcuts"
+                onClick={() => {
+                  setAutoIdentifyOn((v) => {
+                    addLog(v ? 'Auto-identify off' : 'Auto-identify on: recognized songs are added to the track list');
+                    return !v;
+                  });
+                }}
+                aria-pressed={autoIdentifyOn}
+                aria-label={autoIdentifyOn ? 'Turn off automatic song identification' : 'Turn on automatic song identification'}
+                className={`transition-colors ${
+                  autoIdentifyOn ? 'text-primary' : 'text-muted-foreground/40 hover:text-muted-foreground'
+                }`}
+                title={autoIdentifyOn ? 'Auto-identify is on' : 'Auto-identify songs playing in your broadcast'}
               >
-                <Keyboard className="h-4 w-4" />
+                <Ear className="h-4 w-4" aria-hidden />
               </button>
             )}
           </div>
-          {/* Before on-air: show Integrations button */}
           {!isOnAir && (
             <button
               onClick={() => setIntegrationsOpen(true)}
@@ -1246,554 +1213,289 @@ const Broadcaster = () => {
                   : 'text-muted-foreground hover:text-foreground bg-secondary'
               }`}
             >
-              <Plug2 className="h-3 w-3" />
+              <Plug2 className="h-3 w-3" aria-hidden />
               {selectedIntegration ? integrationInfo?.name : 'Integrations'}
             </button>
           )}
-          {/* On-air: show Copy Receiver Link (always — room exists in both modes) */}
           {isOnAir && webrtc.roomId && (
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               {selectedIntegration && integrationInfo && (
                 <span className="flex items-center gap-1.5 text-xs font-mono text-primary bg-primary/10 px-3 py-1.5 rounded-md">
-                  <Radio className="h-3 w-3" />
+                  <Radio className="h-3 w-3" aria-hidden />
                   Streaming on {integrationInfo.name}
                 </span>
               )}
-              <button
-                onClick={copyReceiverLink}
-                className="flex items-center gap-1.5 text-xs font-mono text-muted-foreground hover:text-foreground transition-colors bg-secondary px-3 py-1.5 rounded-md"
-              >
-                <Copy className="h-3 w-3" />
-                {copied ? 'Copied!' : 'Copy Receiver Link'}
-              </button>
+              <ShareLinks roomId={webrtc.roomId} />
             </div>
           )}
         </div>
 
-        {/* Level meter — at top so user can dial in as soon as mic is connected */}
-        <LevelMeter
-          left={audioAnalysis.left}
-          right={audioAnalysis.right}
-          label="Input Level"
-        />
+        <div className="grid grid-cols-1 lg:grid-cols-[1fr_400px] gap-4 items-start">
+          {/* Left column: meters, transport, setup, mixer */}
+          <div className="space-y-4 min-w-0">
+            <LevelMeter
+              left={audioAnalysis.left}
+              right={audioAnalysis.right}
+              label="Input Level"
+            />
 
-        {/* Controls */}
-        <div className="flex gap-3">
-          <button
-            onClick={handleGoOnAir}
-            disabled={isOnAir || !signaling.connected}
-            className={`flex-1 flex items-center justify-center gap-2 py-4 rounded-md text-sm font-semibold transition-all ${
-              isOnAir
-                ? 'bg-muted text-muted-foreground cursor-not-allowed'
-                : 'bg-primary text-primary-foreground hover:opacity-90 animate-pulse-on-air'
-            }`}
-          >
-            <Mic className="h-5 w-5" />
-            {isOnAir ? `On Air - ${formatTime(elapsedSeconds)}` : 'Go On Air'}
-          </button>
-          <button
-            onClick={handleEndBroadcast}
-            disabled={!isOnAir}
-            className={`flex-1 flex items-center justify-center gap-2 py-4 rounded-md text-sm font-semibold transition-all ${
-              !isOnAir
-                ? 'bg-muted text-muted-foreground cursor-not-allowed'
-                : 'bg-destructive text-destructive-foreground hover:opacity-90'
-            }`}
-          >
-            <MicOff className="h-5 w-5" />
-            End Broadcast
-          </button>
-        </div>
+            <TransportBar
+              isOnAir={isOnAir}
+              goingOnAir={goingOnAir}
+              canGoOnAir={signaling.connected}
+              elapsedSeconds={elapsedSeconds}
+              onGoOnAir={handleGoOnAir}
+              onEndBroadcast={() => setEndConfirmOpen(true)}
+              recording={recorder.recording}
+              recordElapsed={recorder.elapsed}
+              recordLabel={`Recording: ${formatClock(recorder.elapsed)} · ${formatFileSize(recorder.encodedBytes)}`}
+              canRecord={Boolean(isOnAir ? mixer.mixedStream : previewStream)}
+              onToggleRecording={handleToggleRecording}
+              muted={micMuted}
+              onToggleMute={handleToggleMute}
+              listening={listening}
+              onToggleListen={handleToggleListen}
+              cueMode={cueMode}
+              onToggleCue={handleToggleCue}
+              limiterDb={limiterDb}
+              onLimiterChange={handleLimiterChange}
+            />
 
-        {/* Mixer controls — visible pre-broadcast for dial-in and level check */}
-        <div className="panel !p-0">
-            <Accordion type="single" collapsible defaultValue="mixer">
-              <AccordionItem value="mixer" className="border-b-0">
-                <AccordionTrigger className="px-4 py-3 hover:no-underline">
-                  <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
-                    <SlidersHorizontal className="h-3.5 w-3.5" />
-                    Audio Controls
-                  </span>
-                </AccordionTrigger>
-                <AccordionContent className="px-4 pb-4">
-            {/* Input Source */}
-            <div className="mt-3 pt-3 border-t border-border">
-              <div className="flex flex-col gap-0.5 mb-2">
-                <span className="text-xs font-semibold text-foreground flex items-center gap-1.5">
-                  <Mic className="h-3 w-3" />
-                  Input Source
-                </span>
-                <span className="text-[10px] text-muted-foreground">
-                  Microphone or audio interface for your broadcast
-                </span>
-              </div>
-              <Select
-                value={selectedDevice}
-                onValueChange={setSelectedDevice}
-                disabled={isOnAir}
-              >
-                <SelectTrigger className="w-full bg-input border-border font-mono text-sm">
-                  <SelectValue placeholder="Select audio device…" />
-                </SelectTrigger>
-                <SelectContent>
-                  {devices.map((d) => (
-                    <SelectItem key={d.deviceId} value={d.deviceId} className="font-mono text-sm">
-                      {d.label || `Device ${d.deviceId.slice(0, 8)}`}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            {/* System Audio */}
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mt-3 pt-3 border-t border-border">
-              <div className="flex flex-col min-w-0">
-                <span className="text-xs font-semibold text-foreground flex items-center gap-1.5">
-                  <Monitor className="h-3 w-3" />
-                  System Audio
-                </span>
-                <span className="text-[10px] text-muted-foreground">
-                  {systemAudioActive
-                    ? (isOnAir ? 'Desktop / app audio mixed into your broadcast' : 'Connected — set levels before going live')
-                    : 'Route desktop / app audio into your broadcast'}
-                </span>
-              </div>
-              <div className="flex justify-end sm:justify-start">
-                <button
-                  onClick={handleToggleSystemAudio}
-                  disabled={!isOnAir && !previewStream}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-all shrink-0 ${
-                    (!isOnAir && !previewStream) ? 'opacity-50 cursor-not-allowed' : ''
-                  } ${
-                    systemAudioActive
-                      ? 'bg-primary/20 text-primary'
-                      : 'bg-secondary text-muted-foreground hover:text-foreground'
-                  }`}
-                  title={systemAudioActive ? 'Stop system audio' : 'Share system audio'}
-                >
-                  {systemAudioActive ? (
-                    <>
-                      <MonitorOff className="h-3 w-3" />
-                      Stop System
-                    </>
-                  ) : (
-                    <>
-                      <Monitor className="h-3 w-3" />
-                      Connect Audio
-                    </>
-                  )}
-                </button>
-              </div>
-            </div>
-
-            {/* Audio Quality */}
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mt-3 pt-3 border-t border-border">
-              <div className="flex flex-col min-w-0">
-                <span className="text-xs font-semibold text-foreground flex items-center gap-1.5">
-                  <Zap className="h-3 w-3" />
-                  Audio Quality
-                </span>
-                <span className="text-[10px] text-muted-foreground">
-                  {qualityMode === 'high' && '510 kbps stereo — pristine broadcast quality'}
-                  {qualityMode === 'auto' && (
-                    <>
-                      Adapts to connection health — currently{' '}
-                      <span className={webrtc.effectiveQuality === 'high' ? 'text-primary' : 'text-yellow-500'}>
-                        {webrtc.effectiveQuality === 'high' ? 'high quality' : 'low bandwidth'}
-                      </span>
-                    </>
-                  )}
-                  {qualityMode === 'low' && '32 kbps mono — saves bandwidth on slow connections'}
-                </span>
-              </div>
-              <Select value={qualityMode} onValueChange={handleQualityChange}>
-                <SelectTrigger className="w-[92px] h-7 bg-secondary border-border text-xs font-mono shrink-0 self-start sm:self-center">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="high" className="text-xs font-mono">High</SelectItem>
-                  <SelectItem value="auto" className="text-xs font-mono">Auto</SelectItem>
-                  <SelectItem value="low" className="text-xs font-mono">Low</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-
-            {/* Recording */}
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mt-3 pt-3 border-t border-border">
-              <div className="flex flex-col min-w-0">
-                <span className="text-xs font-semibold text-foreground flex items-center gap-1.5">
-                  <Circle className={`h-3 w-3 ${recorder.recording ? 'text-red-500 fill-red-500 animate-pulse' : ''}`} />
-                  Record
-                </span>
-                <span className="text-[10px] text-muted-foreground">
-                  {recorder.recording
-                    ? `Recording — ${formatTime(recorder.elapsed)} · ${formatFileSize(recorder.encodedBytes)}`
-                    : 'Save broadcast as 320 kbps MP3'}
-                </span>
-              </div>
-              <button
-                onClick={handleToggleRecording}
-                disabled={!recorder.recording && !(isOnAir ? mixer.mixedStream : previewStream)}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-all shrink-0 self-start sm:self-center ${
-                  (!recorder.recording && !(isOnAir ? mixer.mixedStream : previewStream)) ? 'opacity-50 cursor-not-allowed' : ''
-                } ${
-                  recorder.recording
-                    ? 'bg-red-500/20 text-red-500 hover:bg-red-500/30'
-                    : 'bg-secondary text-muted-foreground hover:text-foreground'
-                }`}
-              >
-                {recorder.recording ? (
-                  <>
-                    <Square className="h-3 w-3 fill-current" />
-                    Stop
-                  </>
-                ) : (
-                  <>
-                    <Circle className="h-3 w-3 fill-current" />
-                    Record
-                  </>
-                )}
-              </button>
-            </div>
-
-            {/* Channel mixer */}
-            <div className="mt-3 pt-3 border-t border-border">
-              <Accordion type="single" collapsible defaultValue="mixer-board">
-                <AccordionItem value="mixer-board" className="border-b-0">
-                  <AccordionTrigger className="py-2 hover:no-underline">
-                    <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Mixer Board</span>
+            {/* Audio setup: input source, system audio, quality */}
+            <div className="panel !p-0">
+              <Accordion type="single" collapsible defaultValue={isOnAir ? '' : 'setup'}>
+                <AccordionItem value="setup" className="border-b-0">
+                  <AccordionTrigger className="px-4 py-3 hover:no-underline">
+                    <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
+                      <Mic className="h-3.5 w-3.5" aria-hidden />
+                      Audio Setup
+                    </span>
                   </AccordionTrigger>
-                  <AccordionContent className="pt-2 space-y-3">
-                    {/* Global Controls */}
-                    <div className="flex items-center justify-between pb-2 border-b border-border/50">
-                      <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/60">Global Controls</span>
-                      <div className="flex flex-wrap gap-2">
+                  <AccordionContent className="px-4 pb-4 space-y-3">
+                    <div>
+                      <div className="flex flex-col gap-0.5 mb-2">
+                        <span className="text-xs font-semibold text-foreground flex items-center gap-1.5">
+                          <Mic className="h-3 w-3" aria-hidden />
+                          Input Source
+                        </span>
+                        <span className="text-[10px] text-muted-foreground">
+                          Microphone or audio interface for your broadcast
+                        </span>
+                      </div>
+                      <Select
+                        value={selectedDevice}
+                        onValueChange={setSelectedDevice}
+                        disabled={isOnAir}
+                      >
+                        <SelectTrigger className="w-full bg-input border-border font-mono text-sm" aria-label="Audio input device">
+                          <SelectValue placeholder="Select audio device…" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {devices.map((d) => (
+                            <SelectItem key={d.deviceId} value={d.deviceId} className="font-mono text-sm">
+                              {d.label || `Device ${d.deviceId.slice(0, 8)}`}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between pt-3 border-t border-border">
+                      <div className="flex flex-col min-w-0">
+                        <span className="text-xs font-semibold text-foreground flex items-center gap-1.5">
+                          <Monitor className="h-3 w-3" aria-hidden />
+                          System Audio
+                        </span>
+                        <span className="text-[10px] text-muted-foreground">
+                          {systemAudioActive
+                            ? (isOnAir ? 'Desktop / app audio mixed into your broadcast' : 'Connected. Set levels before going live.')
+                            : 'Route desktop / app audio into your broadcast'}
+                        </span>
+                      </div>
+                      <div className="flex justify-end sm:justify-start">
                         <button
-                          onClick={handleToggleMute}
-                          disabled={!isOnAir}
-                          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-all ${
-                            !isOnAir ? 'opacity-50 cursor-not-allowed' : ''
+                          onClick={handleToggleSystemAudio}
+                          disabled={!isOnAir && !previewStream}
+                          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-all shrink-0 ${
+                            (!isOnAir && !previewStream) ? 'opacity-50 cursor-not-allowed' : ''
                           } ${
-                            micMuted
-                              ? 'bg-destructive/20 text-destructive'
-                              : 'bg-secondary text-muted-foreground hover:text-foreground'
-                          }`}
-                          title={micMuted ? 'Unmute all channels' : 'Mute all channels'}
-                        >
-                          <MicOff className="h-3.5 w-3.5" />
-                          {micMuted ? 'Muted' : 'Mute'}
-                        </button>
-                        <button
-                          onClick={handleToggleListen}
-                          disabled={!isOnAir}
-                          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-all ${
-                            !isOnAir ? 'opacity-50 cursor-not-allowed' : ''
-                          } ${
-                            listening
+                            systemAudioActive
                               ? 'bg-primary/20 text-primary'
                               : 'bg-secondary text-muted-foreground hover:text-foreground'
                           }`}
-                          title={listening ? 'Stop listening' : 'Listen to broadcast'}
+                          title={systemAudioActive ? 'Stop system audio' : 'Share system audio'}
                         >
-                          <Headphones className="h-3.5 w-3.5" />
-                          Listen
+                          {systemAudioActive ? (
+                            <>
+                              <MonitorOff className="h-3 w-3" aria-hidden />
+                              Stop System
+                            </>
+                          ) : (
+                            <>
+                              <Monitor className="h-3 w-3" aria-hidden />
+                              Connect Audio
+                            </>
+                          )}
                         </button>
-                        <button
-                          onClick={handleToggleCue}
-                          disabled={!isOnAir}
-                          className={`px-3 py-1.5 rounded-md text-xs font-mono font-bold uppercase tracking-wider transition-all ${
-                            !isOnAir ? 'opacity-50 cursor-not-allowed' : ''
-                          } ${
-                            cueMode
-                              ? 'bg-accent/20 text-accent'
-                              : 'bg-secondary text-muted-foreground hover:text-foreground'
-                          }`}
-                          title={cueMode ? 'Cue mode on — sounds are local only' : 'Enable cue mode'}
-                        >
-                          CUE
-                        </button>
-                        <div className="flex items-center gap-1.5 shrink-0">
-                          <span className="text-xs font-mono uppercase tracking-wider text-muted-foreground">Limit</span>
-                          <Select value={String(limiterDb)} onValueChange={handleLimiterChange}>
-                            <SelectTrigger className="w-[92px] h-7 bg-secondary border-border text-xs font-mono">
-                              <SelectValue />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="0" className="text-xs font-mono">0 dB</SelectItem>
-                              <SelectItem value="-3" className="text-xs font-mono">-3 dB</SelectItem>
-                              <SelectItem value="-6" className="text-xs font-mono">-6 dB</SelectItem>
-                              <SelectItem value="-12" className="text-xs font-mono">-12 dB</SelectItem>
-                            </SelectContent>
-                          </Select>
-                        </div>
                       </div>
                     </div>
 
-                    {/* Mic strip */}
-                    <div className="rounded-md border border-border/70 p-2.5 space-y-2 bg-gradient-to-b from-background to-background/60">
-                      <div className="flex items-center gap-3">
-                        <div className="flex items-start gap-2 shrink-0 min-w-[126px]">
-                          <VolumeLeds level={channelLevels.mic} disabled={micMuted} />
-                          <div className="space-y-1">
-                            <span className="block text-xs font-semibold text-foreground">
-                              Mic <span className="font-mono text-muted-foreground tabular-nums">{micMuted ? '—' : `${micVolume}%`}</span>
-                            </span>
-                            <div className="flex items-center gap-1">
-                              <button
-                                onClick={() => setMicMuted((v) => !v)}
-                                className={`size-7 flex items-center justify-center rounded text-[10px] font-mono ${micMuted ? 'bg-destructive/20 text-destructive' : 'bg-secondary text-muted-foreground'}`}
-                                title="Mic mute"
-                              >
-                                M
-                              </button>
-                              <button
-                                onClick={() => setMicSolo((v) => !v)}
-                                className={`size-7 flex items-center justify-center rounded text-[10px] font-mono ${micSolo ? 'bg-primary/20 text-primary' : 'bg-secondary text-muted-foreground'}`}
-                                title="Mic solo"
-                              >
-                                S
-                              </button>
-                              <button
-                                onClick={() => setMicMonitor((v) => !v)}
-                                className={`size-7 flex items-center justify-center rounded ${micMonitor ? 'bg-emerald-500/20 text-emerald-400' : 'bg-secondary text-muted-foreground'}`}
-                                title={micMonitor ? 'Disable mic monitor' : 'Monitor mic locally'}
-                              >
-                                <Headphones className="h-3 w-3" />
-                              </button>
-                            </div>
-                          </div>
-                        </div>
-                        <Slider
-                          value={[micVolume]}
-                          onValueChange={([v]) => handleMicVolumeChange(v)}
-                          min={0}
-                          max={100}
-                          step={1}
-                          sliderVariant="mixer"
-                          className={MIXER_SLIDER_CLASS}
-                        />
-                        <PanKnob value={micPan} onChange={setMicPan} />
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between pt-3 border-t border-border">
+                      <div className="flex flex-col min-w-0">
+                        <span className="text-xs font-semibold text-foreground flex items-center gap-1.5">
+                          <Zap className="h-3 w-3" aria-hidden />
+                          Audio Quality
+                        </span>
+                        <span className="text-[10px] text-muted-foreground">
+                          {qualityMode === 'high' && '510 kbps stereo: pristine broadcast quality'}
+                          {qualityMode === 'auto' && (
+                            <>
+                              Adapts to connection health, currently{' '}
+                              <span className={webrtc.effectiveQuality === 'high' ? 'text-primary' : 'text-yellow-500'}>
+                                {webrtc.effectiveQuality === 'high' ? 'high quality' : 'low bandwidth'}
+                              </span>
+                            </>
+                          )}
+                          {qualityMode === 'low' && '32 kbps mono: saves bandwidth on slow connections'}
+                        </span>
                       </div>
-                    </div>
-
-                    {/* Pads strip */}
-                    <div className="rounded-md border border-border/70 p-2.5 space-y-2 bg-gradient-to-b from-background to-background/60">
-                      <div className="flex items-center gap-3">
-                        <div className="flex items-start gap-2 shrink-0 min-w-[126px]">
-                          <VolumeLeds level={channelLevels.pads} disabled={padsMuted} />
-                          <div className="space-y-1">
-                            <span className="block text-xs font-semibold text-foreground">
-                              SOUND PADS <span className="font-mono text-muted-foreground tabular-nums">{padsMuted ? '—' : `${padsVolume}%`}</span>
-                            </span>
-                            <div className="flex items-center gap-1">
-                              <button
-                                onClick={() => setPadsMuted((v) => !v)}
-                                className={`size-7 flex items-center justify-center rounded text-[10px] font-mono ${padsMuted ? 'bg-destructive/20 text-destructive' : 'bg-secondary text-muted-foreground'}`}
-                                title="Pads mute"
-                              >
-                                M
-                              </button>
-                              <button
-                                onClick={() => setPadsSolo((v) => !v)}
-                                className={`size-7 flex items-center justify-center rounded text-[10px] font-mono ${padsSolo ? 'bg-primary/20 text-primary' : 'bg-secondary text-muted-foreground'}`}
-                                title="Pads solo"
-                              >
-                                S
-                              </button>
-                              <button
-                                onClick={() => setPadsMonitor((v) => !v)}
-                                className={`size-7 flex items-center justify-center rounded ${padsMonitor ? 'bg-emerald-500/20 text-emerald-400' : 'bg-secondary text-muted-foreground'}`}
-                                title={padsMonitor ? 'Disable pads monitor' : 'Monitor pads locally'}
-                              >
-                                <Headphones className="h-3 w-3" />
-                              </button>
-                            </div>
-                          </div>
-                        </div>
-                        <Slider
-                          value={[padsVolume]}
-                          onValueChange={([v]) => setPadsVolume(v)}
-                          min={0}
-                          max={100}
-                          step={1}
-                          sliderVariant="mixer"
-                          className={MIXER_SLIDER_CLASS}
-                        />
-                        <PanKnob value={padsPan} onChange={setPadsPan} />
-                      </div>
-                    </div>
-
-                    {/* System strip */}
-                    <div className={`rounded-md border p-2.5 space-y-2 bg-gradient-to-b from-background to-background/60 ${systemAudioActive ? 'border-border/70' : 'border-border/40 opacity-50'}`}>
-                      <div className="flex items-center gap-3">
-                        <div className="flex items-start gap-2 shrink-0 min-w-[126px]">
-                          <VolumeLeds
-                            level={channelLevels.system}
-                            disabled={!systemAudioActive || systemAudioMuted}
-                          />
-                          <div className="space-y-1">
-                            <span className="block text-xs font-semibold text-foreground">
-                              System Audio <span className="font-mono text-muted-foreground tabular-nums">{systemAudioActive ? `${systemAudioVolume}%` : 'OFF'}</span>
-                            </span>
-                            <div className="flex items-center gap-1">
-                              <button
-                                onClick={() => setSystemAudioMuted((v) => !v)}
-                                disabled={!systemAudioActive}
-                                className={`size-7 flex items-center justify-center rounded text-[10px] font-mono ${systemAudioMuted ? 'bg-destructive/20 text-destructive' : 'bg-secondary text-muted-foreground'} disabled:opacity-40`}
-                                title="System mute"
-                              >
-                                M
-                              </button>
-                              <button
-                                onClick={() => setSystemAudioSolo((v) => !v)}
-                                disabled={!systemAudioActive}
-                                className={`size-7 flex items-center justify-center rounded text-[10px] font-mono ${systemAudioSolo ? 'bg-primary/20 text-primary' : 'bg-secondary text-muted-foreground'} disabled:opacity-40`}
-                                title="System solo"
-                              >
-                                S
-                              </button>
-                              <button
-                                onClick={() => setSystemMonitor((v) => !v)}
-                                disabled={!systemAudioActive}
-                                className={`size-7 flex items-center justify-center rounded ${systemMonitor ? 'bg-emerald-500/20 text-emerald-400' : 'bg-secondary text-muted-foreground'} disabled:opacity-40`}
-                                title={systemMonitor ? 'Disable system monitor' : 'Monitor system audio locally'}
-                              >
-                                <Headphones className="h-3 w-3" />
-                              </button>
-                            </div>
-                          </div>
-                        </div>
-                        <Slider
-                          value={[systemAudioVolume]}
-                          onValueChange={([v]) => handleSystemAudioVolumeChange(v)}
-                          min={0}
-                          max={100}
-                          step={1}
-                          disabled={!systemAudioActive}
-                          sliderVariant="mixer"
-                          className={MIXER_SLIDER_CLASS}
-                        />
-                        <PanKnob value={systemAudioPan} onChange={setSystemAudioPan} disabled={!systemAudioActive} />
-                      </div>
+                      <Select value={qualityMode} onValueChange={handleQualityChange}>
+                        <SelectTrigger className="w-[92px] h-7 bg-secondary border-border text-xs font-mono shrink-0 self-start sm:self-center" aria-label="Audio quality">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="high" className="text-xs font-mono">High</SelectItem>
+                          <SelectItem value="auto" className="text-xs font-mono">Auto</SelectItem>
+                          <SelectItem value="low" className="text-xs font-mono">Low</SelectItem>
+                        </SelectContent>
+                      </Select>
                     </div>
                   </AccordionContent>
                 </AccordionItem>
               </Accordion>
             </div>
 
-                </AccordionContent>
-              </AccordionItem>
-            </Accordion>
+            {/* Mixer: always visible */}
+            <div className="panel" ref={mixerPanelRef}>
+              <div className="panel-header flex items-center gap-1.5 mb-3">
+                <SlidersHorizontal className="h-3.5 w-3.5" aria-hidden />
+                Mixer
+              </div>
+              <MixerBoard
+                channels={channelStates}
+                onChange={handleChannelChange}
+                duckActive={mixer.duckActive}
+              />
+            </div>
           </div>
 
-        {/* Track List — always visible (like mixer), Now Playing search always shown */}
-        <TrackList
-          tracks={trackList}
-          alwaysShow
-          roomId={webrtc.roomId ?? undefined}
-          topContent={
-            <NowPlayingInput
-              value={nowPlaying}
-              onChange={handleNowPlayingChange}
-              onCommit={(meta: TrackMeta) => {
-                if (isOnAir) {
-                  signaling.send({ type: 'add-track', ...meta });
-                  addLog(`Added to track list: ${meta.text || meta.title || 'Unknown'}`, 'info');
-                } else {
-                  toast.info('Go on air first to add tracks');
-                }
-              }}
-              disabled={!isOnAir}
+          {/* Right column: tabbed side panel */}
+          <div ref={sidePanelRef} className="min-w-0 lg:sticky lg:top-4">
+            <SidePanel
+              active={sideTab}
+              onTabChange={(id) => setSideTab(id as SideTab)}
+              tabs={[
+                {
+                  id: 'sounds',
+                  label: 'Sounds',
+                  icon: Music,
+                  content: (
+                    <SoundBoard
+                      connectElement={mixer.connectElement}
+                      triggerRef={soundboardTriggerRef}
+                      onPadPlayback={(title, playing) => addLog(playing ? `▶ ${title}` : `■ ${title}`)}
+                    />
+                  ),
+                },
+                {
+                  id: 'effects',
+                  label: 'Effects',
+                  icon: Sparkles,
+                  content: (
+                    <EffectsBoard
+                      engine={micEffects}
+                      presets={presets}
+                      onApplyPreset={handleApplyPreset}
+                      onSavePresetOpen={() => setSavePresetOpen(true)}
+                      onRequestDeletePreset={(name) => setDeletePresetName(name)}
+                      getAnalyserData={audioAnalysis.getAnalyserData}
+                      onLog={(msg) => addLog(msg)}
+                    />
+                  ),
+                },
+                {
+                  id: 'tracks',
+                  label: 'Tracks',
+                  icon: ListMusic,
+                  content: (
+                    <TrackList
+                      tracks={trackList}
+                      alwaysShow
+                      bare
+                      roomId={webrtc.roomId ?? undefined}
+                      topContent={
+                        <NowPlayingInput
+                          value={nowPlaying}
+                          onChange={handleNowPlayingChange}
+                          onCommit={(meta: TrackMeta) => {
+                            if (isOnAir) {
+                              signaling.send({ type: 'add-track', ...meta });
+                              addLog(`Added to track list: ${meta.text || meta.title || 'Unknown'}`, 'info');
+                            } else {
+                              toast.info('Go on air first to add tracks');
+                            }
+                          }}
+                          disabled={!isOnAir}
+                        />
+                      }
+                    />
+                  ),
+                },
+                {
+                  id: 'log',
+                  label: 'Log',
+                  icon: ScrollText,
+                  content: (
+                    <div className="space-y-4">
+                      <EventLog entries={logs} roomId={webrtc.roomId ?? undefined} listenerCount={isOnAir ? listenerCount : undefined} />
+                      <HealthPanel
+                        stats={webrtc.stats}
+                        connectionState={webrtc.connectionState}
+                        iceConnectionState={webrtc.iceConnectionState}
+                        signalingState={webrtc.signalingState}
+                        peerConnected={webrtc.peerConnected}
+                      />
+                    </div>
+                  ),
+                },
+              ]}
             />
-          }
-        />
-
-        {/* Sounds / Effects */}
-        <div className="panel !p-0">
-          <Accordion type="single" collapsible value={boardExpanded ? 'board' : ''} onValueChange={(v) => setBoardExpanded(v === 'board')} className="border-0">
-            <AccordionItem value="board" className="border-b-0">
-              <AccordionTrigger className="px-4 py-3 hover:no-underline">
-                <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5 flex-1 min-w-0">
-                  {boardExpanded ? (
-                    boardActive === 'effects' ? (
-                      <Sparkles className="h-3.5 w-3.5 shrink-0" />
-                    ) : (
-                      <Music className="h-3.5 w-3.5 shrink-0" />
-                    )
-                  ) : (
-                    <>
-                      <Music className="h-3.5 w-3.5 shrink-0" />
-                      <Sparkles className="h-3.5 w-3.5 shrink-0" />
-                    </>
-                  )}
-                  {boardExpanded ? (boardActive === 'effects' ? 'Effects' : 'Sounds') : 'Sounds / Effects'}
-                </span>
-                {boardExpanded && (
-                  <div className="flex items-center gap-1 shrink-0 mr-3" onClick={(e) => e.stopPropagation()}>
-                    <button
-                      onClick={() => setBoardAccordion('sounds')}
-                      className={`p-1.5 rounded transition-colors ${
-                        boardActive === 'sounds'
-                          ? 'text-primary'
-                          : 'text-muted-foreground/40 hover:text-muted-foreground'
-                      }`}
-                      title="Sounds"
-                    >
-                      <Music className="h-4 w-4" />
-                    </button>
-                    <button
-                      onClick={() => setBoardAccordion('effects')}
-                      className={`p-1.5 rounded transition-colors ${
-                        boardActive === 'effects'
-                          ? 'text-primary'
-                          : 'text-muted-foreground/40 hover:text-muted-foreground'
-                      }`}
-                      title="Effects"
-                    >
-                      <Sparkles className="h-4 w-4" />
-                    </button>
-                  </div>
-                )}
-              </AccordionTrigger>
-              <AccordionContent className="px-4 pb-4 pt-0">
-                {boardActive === 'effects' ? (
-                  <EffectsBoard
-                    effects={micEffects.effects}
-                    onToggle={micEffects.toggleEffect}
-                    onUpdate={micEffects.updateEffect}
-                    presets={presets}
-                    onApplyPreset={handleApplyPreset}
-                    onSavePresetOpen={() => setSavePresetOpen(true)}
-                    onDeletePreset={handleDeletePreset}
-                    onPresetsChange={() => setPresets(getPresets())}
-                  />
-                ) : (
-                  <SoundBoard
-                    connectElement={mixer.connectElement}
-                    triggerRef={soundboardTriggerRef}
-                    onPadPlayback={(title, playing) => addLog(playing ? `▶ ${title}` : `■ ${title}`)}
-                  />
-                )}
-              </AccordionContent>
-            </AccordionItem>
-          </Accordion>
+          </div>
         </div>
-
-        {/* Health + Log — show when on air or when we have previous broadcast data */}
-        {(isOnAir || logs.length > 0 || trackList.length > 0) && (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <HealthPanel
-              stats={webrtc.stats}
-              connectionState={webrtc.connectionState}
-              iceConnectionState={webrtc.iceConnectionState}
-              signalingState={webrtc.signalingState}
-              peerConnected={webrtc.peerConnected}
-            />
-            <EventLog entries={logs} roomId={webrtc.roomId ?? undefined} listenerCount={listenerCount} />
-          </div>
-        )}
-
       </div>
+
+      {/* Mobile bottom navigation */}
+      <nav
+        className="lg:hidden fixed bottom-0 inset-x-0 z-40 flex bg-card border-t border-border"
+        aria-label="Console sections"
+      >
+        {mobileNavItems.map((item) => {
+          const Icon = item.icon;
+          return (
+            <button
+              key={item.id}
+              onClick={item.onSelect}
+              className={`flex-1 flex flex-col items-center gap-0.5 py-2 text-[9px] font-mono uppercase tracking-wider ${
+                item.active ? 'text-primary' : 'text-muted-foreground'
+              }`}
+              aria-label={item.label}
+            >
+              <Icon className="h-4 w-4" aria-hidden />
+              {item.label}
+            </button>
+          );
+        })}
+      </nav>
 
       <Footer />
 
@@ -1804,12 +1506,42 @@ const Broadcaster = () => {
         onSelectIntegration={setSelectedIntegration}
       />
 
+      {/* End broadcast confirmation */}
+      <ConfirmDialog
+        open={endConfirmOpen}
+        onOpenChange={setEndConfirmOpen}
+        title="End broadcast?"
+        description={
+          <>
+            You are {formatClock(elapsedSeconds)} on air with {listenerCount} listener{listenerCount === 1 ? '' : 's'} connected.
+            {recorder.recording && ' Recording continues until you save it.'}
+          </>
+        }
+        confirmLabel="End broadcast"
+        destructive
+        onConfirm={handleEndBroadcast}
+      />
+
+      {/* Preset delete confirmation */}
+      <ConfirmDialog
+        open={deletePresetName !== null}
+        onOpenChange={(open) => { if (!open) setDeletePresetName(null); }}
+        title="Delete preset?"
+        description={deletePresetName ? `"${deletePresetName}" will be removed permanently.` : undefined}
+        confirmLabel="Delete"
+        destructive
+        onConfirm={() => {
+          if (deletePresetName) handleDeletePreset(deletePresetName);
+          setDeletePresetName(null);
+        }}
+      />
+
       {/* System audio info modal */}
       <Dialog open={systemAudioInfoOpen} onOpenChange={setSystemAudioInfoOpen}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              <Monitor className="h-5 w-5 text-primary" />
+              <Monitor className="h-5 w-5 text-primary" aria-hidden />
               System Audio
             </DialogTitle>
             <DialogDescription className="text-sm text-muted-foreground leading-relaxed">
@@ -1825,7 +1557,7 @@ const Broadcaster = () => {
                   Select <strong className="text-foreground">"Entire Screen"</strong> to capture all system audio (Spotify, Music, etc.)
                 </li>
                 <li>
-                  Toggle <strong className="text-foreground">"Share system audio"</strong> on — this is the important part
+                  Toggle <strong className="text-foreground">"Share system audio"</strong> on. This is the important part.
                 </li>
                 <li>
                   Click <strong className="text-foreground">Share</strong>
@@ -1833,13 +1565,10 @@ const Broadcaster = () => {
               </ol>
             </div>
 
-            <div className="flex items-start gap-2 text-xs text-muted-foreground/80">
-              <span className="shrink-0 mt-0.5">🔒</span>
-              <p>
-                <strong className="text-muted-foreground">Nothing on your screen is being shared or recorded.</strong>{' '}
-                We capture at the lowest possible quality (1x1 pixel) and immediately discard the video — only the audio is mixed into your broadcast.
-              </p>
-            </div>
+            <p className="text-xs text-muted-foreground/80">
+              <strong className="text-muted-foreground">Nothing on your screen is being shared or recorded.</strong>{' '}
+              We capture at the lowest possible quality (1x1 pixel) and immediately discard the video. Only the audio is mixed into your broadcast.
+            </p>
           </div>
 
           <div className="flex justify-end gap-2 mt-2">
@@ -1859,13 +1588,13 @@ const Broadcaster = () => {
         </DialogContent>
       </Dialog>
 
-      {/* Start new broadcast — download/copy previous data before starting */}
+      {/* Start new broadcast: download/copy previous data before starting */}
       <Dialog open={startBroadcastDialogOpen} onOpenChange={setStartBroadcastDialogOpen}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>Start New Broadcast</DialogTitle>
             <DialogDescription className="text-sm text-muted-foreground leading-relaxed">
-              You have logs and/or track list from your previous broadcast. Would you like to download them before starting a new one?
+              You have logs and/or a track list from your previous broadcast. Would you like to download them before starting a new one?
             </DialogDescription>
           </DialogHeader>
 
@@ -1896,20 +1625,16 @@ const Broadcaster = () => {
                 }}
                 className="flex items-center justify-center gap-2 w-full py-2.5 rounded-md bg-primary text-primary-foreground font-semibold hover:opacity-90 transition-opacity"
               >
-                <Download className="h-4 w-4" />
+                <Download className="h-4 w-4" aria-hidden />
                 {recorder.recording ? 'Stop Recording & Download ZIP' : 'Download Logs & Track List (ZIP)'}
               </button>
               <button
                 onClick={() => {
-                  if (webrtc.roomId) {
-                    const link = `${window.location.origin}/receive/${webrtc.roomId}`;
-                    navigator.clipboard.writeText(link);
-                    toast('Room link copied');
-                  }
+                  if (webrtc.roomId) copyText(receiveLinkFor(webrtc.roomId), 'Room link');
                 }}
                 className="flex items-center justify-center gap-2 w-full py-2.5 rounded-md bg-secondary text-foreground font-medium hover:bg-secondary/80 transition-colors"
               >
-                <Copy className="h-4 w-4" />
+                <Copy className="h-4 w-4" aria-hidden />
                 Copy Room Link (24h access)
               </button>
             </div>
@@ -1988,6 +1713,7 @@ const Broadcaster = () => {
               placeholder="Preset name…"
               maxLength={40}
               autoFocus
+              aria-label="Preset name"
               onKeyDown={(e) => { if (e.key === 'Enter') handleSavePreset(); }}
               className="w-full bg-input border border-border rounded-md px-3 py-2 text-sm font-mono text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
             />
@@ -2009,7 +1735,7 @@ const Broadcaster = () => {
         <DialogContent className="sm:max-w-xs">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              <Keyboard className="h-4 w-4" />
+              <Keyboard className="h-4 w-4" aria-hidden />
               Keyboard Shortcuts
             </DialogTitle>
             <DialogDescription className="text-xs text-muted-foreground">
@@ -2029,7 +1755,7 @@ const Broadcaster = () => {
         </DialogContent>
       </Dialog>
 
-      {/* Chat FAB — visible when on air */}
+      {/* Chat FAB: visible when on air */}
       <ChatPanel signaling={signaling} active={isOnAir} />
     </div>
   );

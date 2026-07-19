@@ -7,11 +7,13 @@ services:
       - "3001:3001"
     volumes:
       - ./server/logs:/app/logs
+      - ./data:/app/data
     environment:
       - PORT=3001
       - ALLOWED_ORIGIN=*
       - REQUIRE_TLS=false
       - LOG_LEVEL=info
+      - DATA_DIR=/app/data
     restart: unless-stopped
 
   # Optional: TURN server for NAT traversal
