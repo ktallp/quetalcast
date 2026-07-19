@@ -8,9 +8,9 @@ export interface Preset {
   effects: Record<EffectName, EffectState>;
 }
 
-// ── localStorage key ───────────────────────────────────────────────
-
-const STORAGE_KEY = 'quetalcast-presets';
+// Legacy localStorage key (pre-0.6.2, when presets were per-browser).
+// Existing presets are migrated to the signed-in user's account once.
+const LEGACY_STORAGE_KEY = 'quetalcast-presets';
 
 // ── Built-in presets ───────────────────────────────────────────────
 
@@ -22,7 +22,7 @@ function on(name: EffectName, overrides?: Record<string, number>): EffectState {
   return { enabled: true, params: { ...DEFAULT_PARAMS[name], ...overrides } };
 }
 
-const BUILT_IN_PRESETS: Preset[] = [
+export const BUILT_IN_PRESETS: Preset[] = [
   {
     name: 'Podcast Voice',
     builtIn: true,
@@ -64,42 +64,86 @@ const BUILT_IN_PRESETS: Preset[] = [
   },
 ];
 
-// ── Functions ──────────────────────────────────────────────────────
+// ── Helpers ────────────────────────────────────────────────────────
 
-/** Migrate old presets that have mixer fields — strip them to effects-only */
-function migratePreset(p: Preset & { micVolume?: number; limiterDb?: number; qualityMode?: string }): Preset {
-  return { name: p.name, builtIn: p.builtIn, effects: p.effects };
+/** Strip legacy mixer fields so only name/effects survive */
+export function sanitizeStoredPreset(p: { name?: unknown; effects?: unknown }): Omit<Preset, 'builtIn'> | null {
+  if (!p || typeof p.name !== 'string' || !p.name || !p.effects || typeof p.effects !== 'object') return null;
+  return { name: p.name, effects: p.effects as Record<EffectName, EffectState> };
 }
 
-function loadUserPresets(): Preset[] {
+/** One-time migration: push presets saved in this browser to the user's account */
+async function migrateLegacyPresets(): Promise<void> {
+  let raw: string | null = null;
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as (Preset & { micVolume?: number; limiterDb?: number; qualityMode?: string })[];
-    return parsed.map(migratePreset);
+    raw = localStorage.getItem(LEGACY_STORAGE_KEY);
   } catch {
-    return [];
+    return;
+  }
+  if (!raw) return;
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      for (const item of parsed) {
+        const preset = sanitizeStoredPreset(item);
+        if (!preset) continue;
+        await fetch(`/api/presets/${encodeURIComponent(preset.name)}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ effects: preset.effects }),
+        });
+      }
+    }
+    localStorage.removeItem(LEGACY_STORAGE_KEY);
+  } catch {
+    // Leave the legacy data in place; migration retries next load
   }
 }
 
-function saveUserPresets(presets: Preset[]) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(presets));
+// ── Server-backed API ──────────────────────────────────────────────
+
+/** Returns all presets: built-ins first, then the signed-in user's own */
+export async function getPresets(): Promise<Preset[]> {
+  await migrateLegacyPresets();
+  try {
+    const res = await fetch('/api/presets', { credentials: 'include' });
+    if (!res.ok) return [...BUILT_IN_PRESETS];
+    const data = await res.json();
+    const userPresets: Preset[] = (Array.isArray(data.presets) ? data.presets : [])
+      .map((p: { name?: unknown; effects?: unknown }) => sanitizeStoredPreset(p))
+      .filter(Boolean)
+      .map((p: Omit<Preset, 'builtIn'>) => ({ ...p, builtIn: false }));
+    return [...BUILT_IN_PRESETS, ...userPresets];
+  } catch {
+    return [...BUILT_IN_PRESETS];
+  }
 }
 
-/** Returns all presets: built-in first, then user-created */
-export function getPresets(): Preset[] {
-  return [...BUILT_IN_PRESETS, ...loadUserPresets()];
+/** Save (or overwrite) a preset on the signed-in user's account */
+export async function savePreset(name: string, config: Omit<Preset, 'name' | 'builtIn'>): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/presets/${encodeURIComponent(name)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ effects: config.effects }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
 }
 
-/** Save a new user preset (or overwrite existing by name) — effects only */
-export function savePreset(name: string, config: Omit<Preset, 'name' | 'builtIn'>): void {
-  const userPresets = loadUserPresets().filter((p) => p.name !== name);
-  userPresets.push({ ...config, name, builtIn: false });
-  saveUserPresets(userPresets);
-}
-
-/** Delete a user preset by name (built-in presets cannot be deleted) */
-export function deletePreset(name: string): void {
-  const userPresets = loadUserPresets().filter((p) => p.name !== name);
-  saveUserPresets(userPresets);
+/** Delete one of the signed-in user's presets (built-ins cannot be deleted) */
+export async function deletePreset(name: string): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/presets/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+      credentials: 'include',
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
 }

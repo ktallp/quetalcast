@@ -21,7 +21,7 @@ export const EFFECT_LABELS: Record<EffectName, string> = {
   tone: 'Tone',
   compressor: 'Compressor',
   deEsser: 'De-esser',
-  voiceShift: 'Voice Shift',
+  voiceShift: 'Pitch',
   delay: 'Delay',
   echo: 'Reverb',
 };

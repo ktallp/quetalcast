@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { isAuthenticated, logout, verifySession } from '@/lib/auth';
+import { getSession, isAuthenticated, logout, verifySession } from '@/lib/auth';
 import { useSignaling } from '@/hooks/useSignaling';
 import { useWebRTC, type ConnectionStatus, type AudioQuality } from '@/hooks/useWebRTC';
 import { useAudioAnalyser } from '@/hooks/useAudioAnalyser';
@@ -130,7 +130,7 @@ const Broadcaster = () => {
   const [, setNowPlayingCover] = useState<string | undefined>();
   const nowPlayingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [trackList, setTrackList] = useState<Track[]>([]);
-  const [presets, setPresets] = useState(() => getPresets());
+  const [presets, setPresets] = useState<Preset[]>([]);
   const [savePresetOpen, setSavePresetOpen] = useState(false);
   const [newPresetName, setNewPresetName] = useState('');
   const [deletePresetName, setDeletePresetName] = useState<string | null>(null);
@@ -206,6 +206,15 @@ const Broadcaster = () => {
       if (!valid) navigate('/login');
     });
   }, [navigate]);
+
+  // Presets are stored per user on the server
+  const refreshPresets = useCallback(() => {
+    getPresets().then(setPresets).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    refreshPresets();
+  }, [refreshPresets]);
 
   // Auto-identify availability depends on the server having an AcoustID key
   useEffect(() => {
@@ -824,21 +833,29 @@ const Broadcaster = () => {
     addLog(`Preset loaded: ${preset.name}`);
   };
 
-  const handleSavePreset = () => {
+  const handleSavePreset = async () => {
     const name = newPresetName.trim();
     if (!name) return;
-    savePreset(name, {
+    const ok = await savePreset(name, {
       effects: { ...micEffects.effects } as Record<EffectName, { enabled: boolean; params: Record<string, number> }>,
     });
-    setPresets(getPresets());
+    if (!ok) {
+      toast.error('Couldn\'t save the preset. Check your connection and try again.');
+      return;
+    }
+    refreshPresets();
     setSavePresetOpen(false);
     setNewPresetName('');
     addLog(`Preset saved: ${name}`);
   };
 
-  const handleDeletePreset = (name: string) => {
-    deletePreset(name);
-    setPresets(getPresets());
+  const handleDeletePreset = async (name: string) => {
+    const ok = await deletePreset(name);
+    if (!ok) {
+      toast.error('Couldn\'t delete the preset. Check your connection and try again.');
+      return;
+    }
+    refreshPresets();
     addLog(`Preset deleted: ${name}`);
   };
 
@@ -1803,8 +1820,8 @@ const Broadcaster = () => {
         </DialogContent>
       </Dialog>
 
-      {/* Chat FAB: visible when on air */}
-      <ChatPanel signaling={signaling} active={isOnAir} />
+      {/* Chat FAB: visible when on air; chats under the signed-in username */}
+      <ChatPanel signaling={signaling} active={isOnAir} defaultName={getSession()?.username} />
     </div>
   );
 };

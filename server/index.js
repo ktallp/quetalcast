@@ -185,6 +185,39 @@ app.get('/api/capabilities', requireAuth, (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Per-user effect presets
+// ---------------------------------------------------------------------------
+const PRESET_NAME_RE = /^[\w][\w &()'./-]{0,39}$/;
+
+app.get('/api/presets', requireAuth, (req, res) => {
+  res.json({ presets: storage.listPresets(req.user.userId) });
+});
+
+app.put('/api/presets/:name', requireAuth, (req, res) => {
+  const name = String(req.params.name || '').trim();
+  if (!PRESET_NAME_RE.test(name)) {
+    return res.status(400).json({ error: 'Preset name must be 1-40 characters' });
+  }
+  const { effects } = req.body || {};
+  if (!effects || typeof effects !== 'object' || Array.isArray(effects)) {
+    return res.status(400).json({ error: 'Expected { effects: object }' });
+  }
+  if (JSON.stringify(effects).length > 8192) {
+    return res.status(400).json({ error: 'Preset too large' });
+  }
+  if (storage.listPresets(req.user.userId).length >= 50 && !storage.listPresets(req.user.userId).some((p) => p.name === name)) {
+    return res.status(400).json({ error: 'Preset limit reached (50)' });
+  }
+  storage.upsertPreset(req.user.userId, name, effects);
+  res.json({ ok: true });
+});
+
+app.delete('/api/presets/:name', requireAuth, (req, res) => {
+  storage.deletePreset(req.user.userId, String(req.params.name || ''));
+  res.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
 // User management (owner only) + invite flow
 // ---------------------------------------------------------------------------
 const INVITE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours

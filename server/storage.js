@@ -76,6 +76,14 @@ CREATE TABLE IF NOT EXISTS slugs (
   slug TEXT PRIMARY KEY,
   last_used_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS presets (
+  user_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  effects TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (user_id, name)
+);
 `;
 
 /**
@@ -171,6 +179,33 @@ export class Storage {
 
   setUserRole(id, role) {
     this.db.prepare('UPDATE users SET role = ? WHERE id = ?').run(role, id);
+  }
+
+  // ---------------------------------------------------------------- presets
+
+  listPresets(userId) {
+    return this.db
+      .prepare('SELECT name, effects FROM presets WHERE user_id = ? ORDER BY updated_at ASC')
+      .all(userId)
+      .map((row) => {
+        try {
+          return { name: row.name, effects: JSON.parse(row.effects) };
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean);
+  }
+
+  upsertPreset(userId, name, effects) {
+    this.db.prepare(`
+      INSERT INTO presets (user_id, name, effects, updated_at) VALUES (?, ?, ?, ?)
+      ON CONFLICT(user_id, name) DO UPDATE SET effects = excluded.effects, updated_at = excluded.updated_at
+    `).run(userId, name, JSON.stringify(effects), Date.now());
+  }
+
+  deletePreset(userId, name) {
+    this.db.prepare('DELETE FROM presets WHERE user_id = ? AND name = ?').run(userId, name);
   }
 
   deleteUser(id) {

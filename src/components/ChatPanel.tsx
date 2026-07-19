@@ -14,12 +14,14 @@ interface ChatPanelProps {
   signaling: UseSignalingReturn;
   /** Whether the chat panel is active and should show */
   active: boolean;
+  /** Skip the name prompt and chat under this name (signed-in broadcasters) */
+  defaultName?: string;
 }
 
-export function ChatPanel({ signaling, active }: ChatPanelProps) {
+export function ChatPanel({ signaling, active, defaultName }: ChatPanelProps) {
   const [open, setOpen] = useState(false);
-  const [chatName, setChatName] = useState('');
-  const [nameSet, setNameSet] = useState(false);
+  const [chatName, setChatName] = useState(defaultName ?? '');
+  const [nameSet, setNameSet] = useState(Boolean(defaultName));
   const [namePromptOpen, setNamePromptOpen] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState('');

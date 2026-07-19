@@ -13,6 +13,17 @@ export interface ChangelogEntry {
 export const CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-07-18',
+    version: '0.6.2',
+    items: [
+      'Saved effect presets now belong to your account instead of the browser, so they follow you between devices; presets saved before this release migrate automatically on next use',
+      'Broadcaster chat messages are sent under your username, no display-name prompt',
+    ],
+    fixes: [
+      'The pitch effect chip no longer wraps to two lines (renamed from Voice Shift to Pitch)',
+    ],
+  },
+  {
+    date: '2026-07-18',
     version: '0.6.1',
     items: [
       'Owners can change an existing user\'s role between DJ and Owner from the admin Users tab',

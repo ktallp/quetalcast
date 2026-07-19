@@ -283,7 +283,7 @@ export function EffectsBoard({
   };
 
   const chipClass = (enabled: boolean) =>
-    `relative flex items-center gap-1.5 pl-2.5 pr-7 py-2 rounded-md border text-[11px] font-mono transition-all ${
+    `relative flex items-center gap-1.5 pl-2.5 pr-7 py-2 rounded-md border text-[11px] font-mono whitespace-nowrap transition-all ${
       enabled
         ? 'border-primary bg-primary/15 text-primary glow-ring'
         : 'border-border bg-secondary/50 text-muted-foreground hover:bg-secondary'

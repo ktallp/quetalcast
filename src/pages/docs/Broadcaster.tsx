@@ -219,7 +219,7 @@ export default function DocsBroadcaster() {
 
         <h3 className="text-base font-semibold text-foreground mt-6 mb-2">Manual Effects</h3>
         <p>
-          <strong>Voice Shift</strong>, <strong>Delay</strong>, and <strong>Reverb</strong> stay in
+          <strong>Pitch</strong>, <strong>Delay</strong>, and <strong>Reverb</strong> stay in
           the chain while enabled. Toggle them like the Voice chips, and use the gear to tune each
           one.
         </p>
@@ -228,7 +228,8 @@ export default function DocsBroadcaster() {
         <p>
           The presets row saves and recalls effect profiles. Click a preset to apply it, use{' '}
           <strong>Save current…</strong> to store your own, and the trash icon to delete one
-          (deletion asks for confirmation). Built-ins can't be deleted.
+          (deletion asks for confirmation). Built-ins can't be deleted. Saved presets belong to
+          your account, so they follow you between browsers and devices.
         </p>
       </section>
 
