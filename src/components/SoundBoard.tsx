@@ -74,9 +74,14 @@ interface SoundBoardProps {
   triggerRef?: React.MutableRefObject<((index: number) => void) | null>;
   /** Called when a pad starts or stops playing */
   onPadPlayback?: (padTitle: string, playing: boolean) => void;
+  /** Hardware skin: pads render as broadcast carts (stripe, label strip, LED) */
+  hardware?: boolean;
 }
 
-export function SoundBoard({ connectElement, triggerRef, onPadPlayback }: SoundBoardProps) {
+/** Cart stripe colors cycle by slot so a wall of carts stays scannable */
+const CART_STRIPE_COLORS = ['bg-red-400/80', 'bg-amber-400/80', 'bg-emerald-400/80', 'bg-sky-400/80', 'bg-fuchsia-400/70'];
+
+export function SoundBoard({ connectElement, triggerRef, onPadPlayback, hardware }: SoundBoardProps) {
   const [banks, setBanks] = useState<PadState[][]>(emptyBanks);
   const [activeBank, setActiveBank] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -425,18 +430,38 @@ export function SoundBoard({ connectElement, triggerRef, onPadPlayback }: SoundB
                 <button
                   onClick={() => handlePlayStop(i)}
                   aria-label={`${pad.isPlaying ? 'Stop' : 'Play'} pad ${i + 1}: ${pad.title}`}
-                  className={`w-full h-full rounded-md border flex flex-col items-center justify-between pt-[40%] pb-6 transition-all ${
-                    pad.isPlaying
-                      ? 'border-primary bg-primary/15 glow-ring'
-                      : 'border-border bg-secondary/50 hover:bg-secondary'
-                  }`}
+                  className={
+                    hardware
+                      ? `w-full h-full rounded-md hw-cart flex flex-col items-center justify-between pt-[40%] pb-6 transition-all ${
+                          pad.isPlaying
+                            ? 'border-primary shadow-[0_0_12px_hsl(var(--primary)/0.35)]'
+                            : 'hover:brightness-110'
+                        }`
+                      : `w-full h-full rounded-md border flex flex-col items-center justify-between pt-[40%] pb-6 transition-all ${
+                          pad.isPlaying
+                            ? 'border-primary bg-primary/15 glow-ring'
+                            : 'border-border bg-secondary/50 hover:bg-secondary'
+                        }`
+                  }
                 >
+                  {hardware && (
+                    <span
+                      className={`absolute top-[18%] left-2 right-2 h-1 rounded-full ${CART_STRIPE_COLORS[i % CART_STRIPE_COLORS.length]}`}
+                      aria-hidden
+                    />
+                  )}
                   {pad.isPlaying ? (
                     <Square className="h-4 w-4 text-primary fill-primary" aria-hidden />
                   ) : (
                     <Play className="h-4 w-4 text-muted-foreground" aria-hidden />
                   )}
-                  <span className="text-[10px] font-mono text-muted-foreground leading-tight text-center px-1 line-clamp-2 overflow-hidden">
+                  <span
+                    className={
+                      hardware
+                        ? 'hw-cart-label text-[9px] font-mono leading-tight text-center line-clamp-2 overflow-hidden max-w-[92%]'
+                        : 'text-[10px] font-mono text-muted-foreground leading-tight text-center px-1 line-clamp-2 overflow-hidden'
+                    }
+                  >
                     {pad.title}
                   </span>
                 </button>

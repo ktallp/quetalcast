@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { Disc3, ListMusic, Download, Clock, Gauge, AlertTriangle } from 'lucide-react';
+import { Disc3, ListMusic, Download, Clock, Gauge, AlertTriangle, Copy } from 'lucide-react';
+import { copyText } from '@/lib/clipboard';
 import {
   Dialog,
   DialogContent,
@@ -313,13 +314,20 @@ export function TrackList({ tracks, topContent, alwaysShow, roomId, bare }: Trac
               const dur = formatDuration(track.duration);
               const isCurrent = i === 0;
 
+              const copyLabel = [track.artist, track.trackTitle || track.title]
+                .filter(Boolean)
+                .join(' · ');
+
               return (
-                <button
+                <div
                   key={i}
-                  onClick={() => setSelectedTrack(track)}
-                  className={`w-full flex items-center gap-2.5 px-2 py-1.5 text-xs text-left transition-colors cursor-pointer ${
+                  className={`group flex items-center transition-colors ${
                     isCurrent ? 'bg-primary/5 hover:bg-primary/10' : 'hover:bg-secondary/50'
                   }`}
+                >
+                <button
+                  onClick={() => setSelectedTrack(track)}
+                  className="flex-1 min-w-0 flex items-center gap-2.5 px-2 py-1.5 text-xs text-left cursor-pointer"
                 >
                   <span className="w-16 shrink-0 text-muted-foreground/60 tabular-nums font-mono">
                     {formatTime(track.time)}
@@ -366,6 +374,15 @@ export function TrackList({ tracks, topContent, alwaysShow, roomId, bare }: Trac
                     {year}
                   </span>
                 </button>
+                <button
+                  onClick={() => copyText(`${copyLabel} · ${formatTime(track.time)}`, 'Track')}
+                  className="shrink-0 p-1.5 mr-1 rounded text-muted-foreground/50 hover:text-foreground opacity-60 sm:opacity-0 sm:group-hover:opacity-100 focus-visible:opacity-100 transition-opacity"
+                  title="Copy artist, title, and time"
+                  aria-label={`Copy ${copyLabel}`}
+                >
+                  <Copy className="h-3 w-3" aria-hidden />
+                </button>
+                </div>
               );
             })}
           </div>

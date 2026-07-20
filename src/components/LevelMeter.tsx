@@ -6,6 +6,8 @@ interface LevelMeterProps {
   right: ChannelAnalysis;
   label?: string;
   segments?: number;
+  /** Hardware skin: render analog VU faces instead of LED segment bars */
+  hardware?: boolean;
 }
 
 const MIN_DB = -60;
@@ -64,7 +66,28 @@ function MeterBar({ channel, segments, channelLabel }: { channel: ChannelAnalysi
   );
 }
 
-export function LevelMeter({ left, right, label = 'Level', segments = 48 }: LevelMeterProps) {
+/**
+ * Analog VU face: the needle sweeps a real VU-style scale (-20 to +3 VU
+ * mapped over dBFS) and the 250 ms CSS transition approximates classic
+ * VU ballistics, showing perceived loudness rather than instant peaks.
+ */
+function AnalogVu({ channel, channelLabel }: { channel: ChannelAnalysis; channelLabel: string }) {
+  const position = Math.max(0, Math.min(1, (channel.level + 23) / 25));
+  const angle = -46 + position * 92;
+
+  return (
+    <div className="vu-face flex-1" role="img" aria-label={`${channelLabel} channel VU meter`}>
+      <div className="vu-dial">
+        <div className="vu-arc" />
+        <div className="vu-needle" style={{ transform: `rotate(${angle}deg)` }} />
+        <div className="vu-hub" />
+      </div>
+      <span className="vu-tag font-mono">VU · {channelLabel}</span>
+    </div>
+  );
+}
+
+export function LevelMeter({ left, right, label = 'Level', segments = 48, hardware }: LevelMeterProps) {
   const clipping = left.clipping || right.clipping;
   const maxLevel = Math.max(left.level, right.level);
   const maxPeak = Math.max(left.peak, right.peak);
@@ -90,21 +113,30 @@ export function LevelMeter({ left, right, label = 'Level', segments = 48 }: Leve
           )}
         </div>
       </div>
-      <div className="space-y-1">
-        <MeterBar channel={left} segments={segments} channelLabel="L" />
-        <MeterBar channel={right} segments={segments} channelLabel="R" />
-      </div>
-      <div className="relative mt-1 ml-5 h-3">
-        {SCALE_MARKS.map((mark) => (
-          <span
-            key={mark.db}
-            className="absolute text-[9px] font-mono text-muted-foreground -translate-x-1/2"
-            style={{ left: `${dbToPosition(mark.db) * 100}%` }}
-          >
-            {mark.label}
-          </span>
-        ))}
-      </div>
+      {hardware ? (
+        <div className="flex gap-2">
+          <AnalogVu channel={left} channelLabel="L" />
+          <AnalogVu channel={right} channelLabel="R" />
+        </div>
+      ) : (
+        <>
+          <div className="space-y-1">
+            <MeterBar channel={left} segments={segments} channelLabel="L" />
+            <MeterBar channel={right} segments={segments} channelLabel="R" />
+          </div>
+          <div className="relative mt-1 ml-5 h-3">
+            {SCALE_MARKS.map((mark) => (
+              <span
+                key={mark.db}
+                className="absolute text-[9px] font-mono text-muted-foreground -translate-x-1/2"
+                style={{ left: `${dbToPosition(mark.db) * 100}%` }}
+              >
+                {mark.label}
+              </span>
+            ))}
+          </div>
+        </>
+      )}
     </div>
   );
 }

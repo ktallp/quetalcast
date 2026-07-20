@@ -237,16 +237,49 @@ export default function DocsBroadcaster() {
         <h2 className="text-lg font-semibold text-foreground mb-3">Tracks &amp; Now Playing</h2>
         <p>
           The <strong>Tracks</strong> tab has the Now Playing search at the top: Deezer
-          autocomplete for artist and song, or type freeform text. Committing a track adds it to
-          the track list, sends it to all listeners in real time, and pushes it to any connected
-          integration. The current track is highlighted with a spinning disc; click any track for
-          details, and download the list as CSV with the icon next to the title.
+          autocomplete for artist and song, or type freeform text. While on air, committing a
+          track adds it to the track list, sends it to all listeners in real time, and pushes it
+          to any connected integration. The current track is highlighted with a spinning disc;
+          click any track for details, and download the list as CSV with the icon next to the
+          title.
         </p>
         <p className="mt-2">
-          <strong>Auto-identify</strong>: if the server has an AcoustID key configured, an ear icon
-          appears in the console header. Turn it on and songs playing in your broadcast are
-          recognized automatically and added to the track list, no typing needed. If there's no
-          key on the server, the icon simply doesn't appear.
+          <strong>Setlist</strong>: the same search works before you go on air. Off-air commits
+          queue into a setlist that keeps each track's full metadata (art, album, ISRC) and
+          survives reloads. Once you're live, press <strong>Mark played</strong> on a row the
+          moment it airs to publish it to the live track list, or remove rows you skipped. This
+          is also the cleanest way to feed the compliance reports, since queued tracks arrive
+          fully identified.
+        </p>
+        <p className="mt-2">
+          <strong>Auto-identify</strong>: if the server has an AcoustID key configured, a
+          checkbox appears in the broadcast settings dialog, "Automatically identify songs for
+          reporting". It is off by default and applies to that session only; the ear icon in the
+          console header toggles it mid-show, and it always resets when the broadcast ends.
+          Recognized songs are matched to their ISRC, album, and label through Deezer and added
+          to the track list. If there's no key on the server, neither control appears.
+        </p>
+      </section>
+
+      <section>
+        <h2 className="text-lg font-semibold text-foreground mb-3">Show report</h2>
+        <p>
+          When you end a broadcast, a report opens with the listener curve (sampled once a
+          minute), the peak and average listener counts, time on air, and how many tracks you
+          played. Download the per-minute listener counts as CSV from the same dialog.
+        </p>
+      </section>
+
+      <section>
+        <h2 className="text-lg font-semibold text-foreground mb-3">Hardware look</h2>
+        <p>
+          The gauge icon in the console header switches the console to an optional hardware
+          skin: analog VU needles with real ballistics in place of the LED bars, sound pads
+          styled as broadcast carts with color stripes and label strips, backlit latching
+          switches for Rec, Mute, Listen, and Cue, and an LED elapsed-time display in the status
+          bar. It is purely cosmetic, off by default, and remembered per browser. The mixer
+          strips also show a small amber <strong>DUCK</strong> indicator whenever auto-duck is
+          actively dipping music under your voice, in either look.
         </p>
       </section>
 

@@ -5,6 +5,8 @@ import { Shield, Radio, LogOut } from 'lucide-react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { RoomsPanel, type AdminRoom, type RoomStats } from '@/components/admin/RoomsPanel';
 import { UsersPanel } from '@/components/admin/UsersPanel';
+import { CompliancePanel } from '@/components/admin/CompliancePanel';
+import { ArchivesPanel } from '@/components/admin/ArchivesPanel';
 
 const Admin = () => {
   const navigate = useNavigate();
@@ -89,6 +91,8 @@ const Admin = () => {
           <TabsList>
             <TabsTrigger value="rooms">Rooms</TabsTrigger>
             {owner && <TabsTrigger value="users">Users</TabsTrigger>}
+            {owner && <TabsTrigger value="compliance">Compliance</TabsTrigger>}
+            {owner && <TabsTrigger value="archives">Archives</TabsTrigger>}
           </TabsList>
 
           <TabsContent value="rooms" className="mt-4">
@@ -105,6 +109,18 @@ const Admin = () => {
           {owner && (
             <TabsContent value="users" className="mt-4">
               <UsersPanel />
+            </TabsContent>
+          )}
+
+          {owner && (
+            <TabsContent value="compliance" className="mt-4">
+              <CompliancePanel />
+            </TabsContent>
+          )}
+
+          {owner && (
+            <TabsContent value="archives" className="mt-4">
+              <ArchivesPanel />
             </TabsContent>
           )}
         </Tabs>

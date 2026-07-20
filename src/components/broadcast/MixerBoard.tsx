@@ -240,6 +240,24 @@ function ChannelStrip({
             <span className="block text-xs font-semibold text-foreground">
               {c.label}{' '}
               <span className="font-mono text-muted-foreground tabular-nums">{volumeLabel}</span>
+              {c.duckable && c.duck && (
+                <span
+                  className={`inline-flex items-center gap-1 ml-1.5 align-middle text-[8px] font-mono uppercase tracking-widest ${
+                    duckActive ? 'text-accent' : 'text-muted-foreground/40'
+                  }`}
+                  title={duckActive ? 'Auto-duck engaged: dipped about 9 dB under the mic' : 'Auto-duck armed'}
+                >
+                  <span
+                    className={`h-1.5 w-1.5 rounded-full ${
+                      duckActive
+                        ? 'bg-accent shadow-[0_0_6px_hsl(var(--accent))] motion-safe:animate-pulse'
+                        : 'bg-muted-foreground/30'
+                    }`}
+                    aria-hidden
+                  />
+                  duck
+                </span>
+              )}
             </span>
             <div className="flex items-center gap-1">
               <button

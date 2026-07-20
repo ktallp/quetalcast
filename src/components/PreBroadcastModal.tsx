@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Radio, Clock, X, Link, Type, FileText } from 'lucide-react';
+import { Radio, Clock, X, Link, Type, FileText, Ear } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
@@ -21,6 +21,7 @@ export interface BroadcastSettings {
   customUrl: string;
   streamTitle: string;
   streamDescription: string;
+  autoIdentify: boolean;
 }
 
 interface PreBroadcastModalProps {
@@ -28,6 +29,10 @@ interface PreBroadcastModalProps {
   onOpenChange: (open: boolean) => void;
   onStart: (settings: BroadcastSettings) => void;
   onSkip: () => void;
+  /** Show the auto-identify consent checkbox (server has an AcoustID key) */
+  showAutoIdentify?: boolean;
+  /** Seed for the checkbox, e.g. when the ear toggle was already lit pre-air */
+  defaultAutoIdentify?: boolean;
 }
 
 async function fetchSavedSlugs(): Promise<SavedSlug[]> {
@@ -64,7 +69,7 @@ function validateCustomUrl(value: string): string | null {
 const TITLE_KEY = 'quetalcast:stream-title';
 const DESC_KEY = 'quetalcast:stream-description';
 
-export function PreBroadcastModal({ open, onOpenChange, onStart, onSkip }: PreBroadcastModalProps) {
+export function PreBroadcastModal({ open, onOpenChange, onStart, onSkip, showAutoIdentify, defaultAutoIdentify }: PreBroadcastModalProps) {
   const [customUrl, setCustomUrl] = useState('');
   const [customUrlError, setCustomUrlError] = useState<string | null>(null);
   const [savedSlugs, setSavedSlugs] = useState<SavedSlug[]>([]);
@@ -72,6 +77,7 @@ export function PreBroadcastModal({ open, onOpenChange, onStart, onSkip }: PreBr
   const [streamTitle, setStreamTitle] = useState(() => localStorage.getItem(TITLE_KEY) ?? '');
   const [streamDescription, setStreamDescription] = useState(() => localStorage.getItem(DESC_KEY) ?? '');
   const [pendingDeleteSlug, setPendingDeleteSlug] = useState<string | null>(null);
+  const [autoIdentify, setAutoIdentify] = useState(false);
   const urlInputRef = useRef<HTMLInputElement>(null);
 
   const refreshSlugs = useCallback(async () => {
@@ -83,8 +89,11 @@ export function PreBroadcastModal({ open, onOpenChange, onStart, onSkip }: PreBr
     if (open) {
       refreshSlugs();
       setCustomUrlError(null);
+      // Consent is per-session: never remembered, only seeded from a
+      // deliberately lit ear toggle in the current session.
+      setAutoIdentify(Boolean(defaultAutoIdentify));
     }
-  }, [open, refreshSlugs]);
+  }, [open, refreshSlugs, defaultAutoIdentify]);
 
   const handleStart = () => {
     const slug = customUrl.trim().toLowerCase();
@@ -97,7 +106,7 @@ export function PreBroadcastModal({ open, onOpenChange, onStart, onSkip }: PreBr
     }
     localStorage.setItem(TITLE_KEY, streamTitle);
     localStorage.setItem(DESC_KEY, streamDescription);
-    onStart({ customUrl: slug, streamTitle: streamTitle.trim(), streamDescription: streamDescription.trim() });
+    onStart({ customUrl: slug, streamTitle: streamTitle.trim(), streamDescription: streamDescription.trim(), autoIdentify });
   };
 
   const handleSkip = () => {
@@ -272,6 +281,31 @@ export function PreBroadcastModal({ open, onOpenChange, onStart, onSkip }: PreBr
               </p>
             )}
           </div>
+
+          {/* Auto-identify consent (per-session, default off) */}
+          {showAutoIdentify && (
+            <div className="space-y-1.5">
+              <label className="flex items-start gap-2.5 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={autoIdentify}
+                  onChange={(e) => setAutoIdentify(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 rounded border-border bg-input accent-primary"
+                />
+                <span>
+                  <span className="flex items-center gap-1.5 text-xs font-semibold text-foreground">
+                    <Ear className="h-3.5 w-3.5" aria-hidden />
+                    Automatically identify songs for reporting
+                  </span>
+                  <span className="block text-[10px] text-muted-foreground/60 mt-0.5">
+                    This session only, off by default. Recognized songs are matched to
+                    ISRCs and added to the track list. The ear icon in the console
+                    header toggles it mid-show.
+                  </span>
+                </span>
+              </label>
+            </div>
+          )}
         </div>
 
         <div className="flex gap-2 mt-4 pt-4 border-t border-border">

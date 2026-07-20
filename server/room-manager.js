@@ -62,6 +62,10 @@ export class RoomManager {
           if (t.album) entry.album = t.album;
           if (t.year) entry.releaseDate = t.year;
           if (t.cover_url) { entry.cover = t.cover_url; entry.coverMedium = t.cover_url; }
+          if (t.track_title) entry.trackTitle = t.track_title;
+          if (t.isrc) entry.isrc = t.isrc;
+          if (t.label) entry.label = t.label;
+          if (t.duration) entry.duration = t.duration;
           return entry;
         });
         room.chatHistory = this.storage.getChat(row.id, 200).map((c) => ({
@@ -91,6 +95,7 @@ export class RoomManager {
       chatHistory: [],
       chatParticipants: new Map(),
       integrationInfo: null,
+      receiverSessions: new Map(),
       relayListeners: new Set(),
       relayHeader: null,
       ffmpegProcess: null,
@@ -178,6 +183,7 @@ export class RoomManager {
           try { writer.end(); } catch { /* */ }
         }
         room.relayListeners.clear();
+        try { this.storage?.closeRoomListenerSessions(id, Date.now()); } catch { /* non-fatal */ }
         this.rooms.delete(id);
         this.logger.info({ roomId: id.slice(0, 8) }, 'Room expired (24h TTL)');
       }
@@ -215,6 +221,7 @@ export class RoomManager {
           try { writer.end(); } catch { /* ignore */ }
         }
         existing.relayListeners.clear();
+        try { this.storage?.closeRoomListenerSessions(customId, Date.now()); } catch { /* non-fatal */ }
         this.rooms.delete(customId);
       }
     }
@@ -283,7 +290,21 @@ export class RoomManager {
 
     const receiverId = crypto.randomBytes(4).toString('hex');
     room.receivers.set(receiverId, ws);
+    try {
+      const sessionId = this.storage?.openListenerSession(roomId, 'webrtc', Date.now());
+      if (sessionId) room.receiverSessions.set(receiverId, sessionId);
+    } catch (err) {
+      this.logger.warn({ roomId: roomId.slice(0, 8), error: err.message }, 'Failed to open listener session');
+    }
     return { ok: true, receiverId };
+  }
+
+  /** Close the persisted listening session for a receiver, if one is open */
+  _closeReceiverSession(room, receiverId) {
+    const sessionId = room.receiverSessions?.get(receiverId);
+    if (!sessionId) return;
+    room.receiverSessions.delete(receiverId);
+    try { this.storage?.closeListenerSession(sessionId, Date.now()); } catch { /* non-fatal */ }
   }
 
   leave(roomId, role, receiverId) {
@@ -297,6 +318,7 @@ export class RoomManager {
       this.logger.info({ roomId: roomId.slice(0, 8) }, 'Broadcast ended, room kept for 24h');
     } else if (role === 'receiver' && receiverId) {
       room.receivers.delete(receiverId);
+      this._closeReceiverSession(room, receiverId);
     }
 
     // Only delete room if it was never used (no track list, no chat) and empty
@@ -396,6 +418,10 @@ export class RoomManager {
         year: yearMatch ? yearMatch[1] : null,
         coverUrl: meta.coverMedium || meta.cover || null,
         source: meta.source || 'live',
+        trackTitle: meta.title || null,
+        isrc: meta.isrc || null,
+        label: meta.label || null,
+        duration: typeof meta.duration === 'number' ? meta.duration : null,
       });
     } catch (err) {
       this.logger.warn({ roomId: roomId.slice(0, 8), error: err.message }, 'Failed to persist track');
@@ -470,12 +496,21 @@ export class RoomManager {
     const room = this.rooms.get(roomId);
     if (!room) return false;
     room.relayListeners.add(res);
+    try {
+      res._listenerSessionId = this.storage?.openListenerSession(roomId, 'relay', Date.now()) || null;
+    } catch (err) {
+      this.logger.warn({ roomId: roomId.slice(0, 8), error: err.message }, 'Failed to open relay listener session');
+    }
     return true;
   }
 
   removeRelayListener(roomId, res) {
     const room = this.rooms.get(roomId);
     if (room) room.relayListeners.delete(res);
+    if (res?._listenerSessionId) {
+      try { this.storage?.closeListenerSession(res._listenerSessionId, Date.now()); } catch { /* non-fatal */ }
+      res._listenerSessionId = null;
+    }
   }
 
   getRelayListeners(roomId) {

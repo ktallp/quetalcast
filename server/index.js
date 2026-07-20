@@ -185,6 +185,43 @@ app.get('/api/capabilities', requireAuth, (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Station settings (service name, license category) used by compliance reports
+// ---------------------------------------------------------------------------
+const STATION_SETTING_KEYS = ['station_name', 'license_category', 'archive_enabled', 'archive_keep'];
+const LICENSE_CATEGORIES = ['noncommercial-crb', 'noncommercial-educational', 'commercial-crb'];
+
+app.get('/api/station-settings', requireAuth, (req, res) => {
+  const all = storage.getAllSettings();
+  const out = {};
+  for (const key of STATION_SETTING_KEYS) out[key] = all[key] ?? null;
+  res.json(out);
+});
+
+app.put('/api/station-settings', requireAuth, requireOwner, (req, res) => {
+  const body = req.body || {};
+  if (typeof body.station_name === 'string') {
+    storage.setSetting('station_name', body.station_name.trim().slice(0, 100));
+  }
+  if (typeof body.license_category === 'string') {
+    if (!LICENSE_CATEGORIES.includes(body.license_category)) {
+      return res.status(400).json({ error: 'Unknown license category' });
+    }
+    storage.setSetting('license_category', body.license_category);
+  }
+  if (typeof body.archive_enabled === 'boolean') {
+    storage.setSetting('archive_enabled', body.archive_enabled ? 'true' : 'false');
+  }
+  if (body.archive_keep !== undefined) {
+    const keep = Number(body.archive_keep);
+    if (!Number.isInteger(keep) || keep < 1 || keep > 100) {
+      return res.status(400).json({ error: 'archive_keep must be 1-100' });
+    }
+    storage.setSetting('archive_keep', String(keep));
+  }
+  res.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
 // Per-user effect presets
 // ---------------------------------------------------------------------------
 const PRESET_NAME_RE = /^[\w][\w &()'./-]{0,39}$/;
@@ -435,6 +472,60 @@ if (ffmpegPath) {
  * Spawns an FFmpeg process that reads WebM/Opus from stdin and writes MP3
  * to stdout. MP3 output chunks are distributed to all relay listeners.
  */
+// ---------------------------------------------------------------------------
+// Show archive — tee the relay MP3 to disk when archiving is enabled, so
+// every broadcast leaves a recording with zero DJ effort. Opt-in via the
+// archive_enabled setting; retention capped by archive_keep.
+// ---------------------------------------------------------------------------
+
+function archiveDir() {
+  return path.join(storage.dataDir, 'archive');
+}
+
+function startArchiveTee(room, roomId) {
+  if (room.archiveStream) return;
+  if (storage.getSetting('archive_enabled') !== 'true') return;
+  try {
+    const dir = archiveDir();
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, `${roomId}.mp3`);
+    room.archiveStream = fs.createWriteStream(file, { flags: 'a' });
+    room.archiveStream.on('error', (err) => {
+      logger.warn({ roomId: roomId.slice(0, 8), error: err.message }, 'Archive write error');
+      room.archiveStream = null;
+    });
+    room.archiveFile = file;
+    storage.upsertArchive(roomId, file);
+    logger.info({ roomId: roomId.slice(0, 8) }, 'Archiving broadcast to disk');
+  } catch (err) {
+    logger.warn({ roomId: roomId.slice(0, 8), error: err.message }, 'Failed to start archive');
+  }
+}
+
+function finalizeArchive(room, roomId) {
+  if (!room.archiveStream) return;
+  const stream = room.archiveStream;
+  const file = room.archiveFile;
+  room.archiveStream = null;
+  try { stream.end(); } catch { /* already closed */ }
+  try {
+    if (file && fs.existsSync(file)) {
+      storage.updateArchiveBytes(roomId, fs.statSync(file).size);
+    }
+  } catch { /* non-fatal */ }
+  pruneArchives();
+}
+
+function pruneArchives() {
+  const keep = Math.max(1, Math.min(100, Number(storage.getSetting('archive_keep')) || 10));
+  const rows = storage.listArchives();
+  for (const row of rows.slice(keep)) {
+    try { if (fs.existsSync(row.file)) fs.unlinkSync(row.file); } catch { /* non-fatal */ }
+    storage.deleteArchive(row.room_id);
+    logger.info({ roomId: row.room_id.slice(0, 8) }, 'Archive pruned (retention cap)');
+  }
+}
+
 function startRoomTranscoder(room, roomId) {
   if (room.ffmpegProcess || !ffmpegPath) return;
 
@@ -456,6 +547,7 @@ function startRoomTranscoder(room, roomId) {
 
   const proc = spawn(ffmpegPath, args, { stdio: ['pipe', 'pipe', 'pipe'] });
   room.ffmpegProcess = proc;
+  startArchiveTee(room, roomId);
 
   proc.stdin.on('error', (err) => {
     if (err.code !== 'EPIPE' && err.code !== 'ERR_STREAM_DESTROYED') {
@@ -464,6 +556,9 @@ function startRoomTranscoder(room, roomId) {
   });
 
   proc.stdout.on('data', (mp3Data) => {
+    if (room.archiveStream) {
+      try { room.archiveStream.write(mp3Data); } catch { /* archive error handler cleans up */ }
+    }
     for (const writer of room.relayListeners) {
       if (writer.dead) { room.relayListeners.delete(writer); continue; }
       try { writer.write(mp3Data); } catch { room.relayListeners.delete(writer); }
@@ -491,6 +586,7 @@ function startRoomTranscoder(room, roomId) {
 }
 
 function stopRoomTranscoder(room) {
+  finalizeArchive(room, room.roomId || '');
   if (!room.ffmpegProcess) return;
   const proc = room.ffmpegProcess;
   room.ffmpegProcess = null;
@@ -798,6 +894,275 @@ app.delete('/admin/rooms/:id', requireAuth, requireOwner, (req, res) => {
 app.get('/admin/rooms/:id/analytics', requireAuth, (req, res) => {
   const samples = storage.getListenerSamples(req.params.id, Date.now() - 24 * 60 * 60 * 1000);
   res.json({ samples: samples.map((s) => ({ ts: s.ts, count: s.count })) });
+});
+
+// Show report — the numbers a DJ wants the moment the broadcast ends
+app.get('/api/rooms/:id/report', requireAuth, (req, res) => {
+  const room = storage.getRoom(req.params.id);
+  if (!room) return res.status(404).json({ error: 'Room not found' });
+  const startTs = room.created_at;
+  const endTs = room.ended_at || Date.now();
+  const samples = storage.getListenerSamplesBetween(req.params.id, startTs, endTs);
+  const counts = samples.map((s) => s.count);
+  const peak = Math.max(room.peak_listeners || 0, ...(counts.length ? counts : [0]));
+  const avg = counts.length ? counts.reduce((a, b) => a + b, 0) / counts.length : 0;
+  res.json({
+    id: room.id,
+    title: room.title || null,
+    startedAt: startTs,
+    endedAt: room.ended_at || null,
+    durationSec: Math.max(0, Math.round((endTs - startTs) / 1000)),
+    peak,
+    avg: Math.round(avg * 10) / 10,
+    trackCount: storage.countTracks(req.params.id),
+    samples: samples.map((s) => ({ ts: s.ts, count: s.count })),
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Compliance: SoundExchange Report of Use data built from persisted tracks
+// and listener sessions. Performances = listener sessions overlapping a
+// track's play window; ATH = summed session time inside the report range.
+// ---------------------------------------------------------------------------
+
+const DEFAULT_TRACK_SECONDS = 180; // assumed play length when Deezer duration is unknown
+
+function overlapMs(aStart, aEnd, bStart, bEnd) {
+  return Math.max(0, Math.min(aEnd, bEnd) - Math.max(aStart, bStart));
+}
+
+function buildComplianceData(startTs, endTs) {
+  const tracks = storage.getTracksInRange(startTs, endTs);
+  const sessions = storage.getListenerSessionsInRange(startTs, endTs);
+
+  const sessionsByRoom = new Map();
+  for (const s of sessions) {
+    if (!sessionsByRoom.has(s.room_id)) sessionsByRoom.set(s.room_id, []);
+    sessionsByRoom.get(s.room_id).push(s);
+  }
+
+  let athMs = 0;
+  for (const s of sessions) {
+    athMs += overlapMs(startTs, endTs, s.joined_at, s.left_at ?? endTs);
+  }
+
+  // Aggregate spins and performances per unique recording
+  const works = new Map();
+  const missing = [];
+  let totalPerformances = 0;
+
+  for (const t of tracks) {
+    const windowStart = t.ts;
+    const windowEnd = t.ts + (t.duration || DEFAULT_TRACK_SECONDS) * 1000;
+    const roomSessions = sessionsByRoom.get(t.room_id) || [];
+    let performances = 0;
+    for (const s of roomSessions) {
+      if (overlapMs(windowStart, windowEnd, s.joined_at, s.left_at ?? endTs) > 0) performances++;
+    }
+    totalPerformances += performances;
+
+    const artist = t.artist || '';
+    const title = t.track_title || t.title || '';
+    const hasIdentification = !!t.isrc || (!!t.album && !!t.label);
+    if (!hasIdentification) {
+      missing.push({
+        id: t.id,
+        ts: t.ts,
+        roomId: t.room_id,
+        text: t.title || '',
+        artist: t.artist || null,
+        trackTitle: t.track_title || null,
+        album: t.album || null,
+      });
+    }
+
+    const key = `${(t.isrc || '').toLowerCase()}|${artist.toLowerCase()}|${title.toLowerCase()}`;
+    const existing = works.get(key);
+    if (existing) {
+      existing.spins += 1;
+      existing.performances += performances;
+    } else {
+      works.set(key, {
+        artist,
+        title,
+        isrc: t.isrc || '',
+        album: t.album || '',
+        label: t.label || '',
+        spins: 1,
+        performances,
+      });
+    }
+  }
+
+  return {
+    start: startTs,
+    end: endTs,
+    athHours: Math.round((athMs / 3600000) * 10) / 10,
+    totalPerformances,
+    totalSpins: tracks.length,
+    works: [...works.values()].sort((a, b) => b.performances - a.performances),
+    missing,
+  };
+}
+
+function parseComplianceRange(req, res) {
+  const start = Number(req.query.start);
+  const end = Number(req.query.end);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+    res.status(400).json({ error: 'Expected start and end timestamps (ms)' });
+    return null;
+  }
+  return { start, end };
+}
+
+app.get('/api/compliance/report', requireAuth, (req, res) => {
+  const range = parseComplianceRange(req, res);
+  if (!range) return;
+  const settings = storage.getAllSettings();
+  res.json({
+    ...buildComplianceData(range.start, range.end),
+    station: {
+      name: settings.station_name || null,
+      category: settings.license_category || null,
+    },
+  });
+});
+
+// Report of Use download. Field names follow SoundExchange's ROU spec;
+// verify delimiter and header details against the current template at
+// delivery time.
+app.get('/api/compliance/rou', requireAuth, (req, res) => {
+  const range = parseComplianceRange(req, res);
+  if (!range) return;
+  const data = buildComplianceData(range.start, range.end);
+  const settings = storage.getAllSettings();
+  const serviceName = settings.station_name || 'QueTalCast';
+  const category = settings.license_category || '';
+
+  const clean = (v) => String(v ?? '').replace(/[\t\r\n]/g, ' ').trim();
+  const header = [
+    'NAME_OF_SERVICE', 'TRANSMISSION_CATEGORY', 'FEATURED_ARTIST', 'SOUND_RECORDING_TITLE',
+    'ISRC', 'ALBUM_TITLE', 'MARKETING_LABEL', 'ACTUAL_TOTAL_PERFORMANCES',
+  ].join('\t');
+  const lines = [header];
+  for (const w of data.works) {
+    lines.push([
+      clean(serviceName), clean(category), clean(w.artist), clean(w.title),
+      clean(w.isrc), clean(w.album), clean(w.label), String(w.performances),
+    ].join('\t'));
+  }
+
+  const from = new Date(range.start).toISOString().slice(0, 10);
+  const to = new Date(range.end).toISOString().slice(0, 10);
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="ROU_${from}_${to}.txt"`);
+  res.send(lines.join('\n'));
+});
+
+// Full playlist CSV for the range (one row per spin)
+app.get('/api/compliance/playlist', requireAuth, (req, res) => {
+  const range = parseComplianceRange(req, res);
+  if (!range) return;
+  const tracks = storage.getTracksInRange(range.start, range.end);
+  const esc = (v) => {
+    const s = String(v ?? '');
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const lines = ['time,room,artist,title,album,label,isrc,duration_sec,source'];
+  for (const t of tracks) {
+    lines.push([
+      new Date(t.ts).toISOString(), t.room_id, esc(t.artist), esc(t.track_title || t.title),
+      esc(t.album), esc(t.label), esc(t.isrc), t.duration ?? '', t.source ?? '',
+    ].join(','));
+  }
+  const from = new Date(range.start).toISOString().slice(0, 10);
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="playlist_${from}.csv"`);
+  res.send(lines.join('\n'));
+});
+
+// ISRC fix-up: attach reporting metadata to a single persisted track row
+app.patch('/api/compliance/track/:id', requireAuth, (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Bad track id' });
+  const b = req.body || {};
+  const str = (v) => (typeof v === 'string' ? v.slice(0, 500) : null);
+  storage.updateTrackReportingMeta(id, {
+    trackTitle: str(b.trackTitle),
+    artist: str(b.artist),
+    album: str(b.album),
+    label: str(b.label),
+    isrc: str(b.isrc),
+    duration: typeof b.duration === 'number' ? b.duration : null,
+  });
+  res.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// Show archive pages — public playback of archived broadcasts with their
+// track list and chat replay. Archives exist only when archiving is on.
+// ---------------------------------------------------------------------------
+
+app.get('/api/archives', requireAuth, (req, res) => {
+  const rows = storage.listArchives().map((a) => {
+    const room = storage.getRoom(a.room_id);
+    return {
+      roomId: a.room_id,
+      title: room?.title || null,
+      startedAt: room?.created_at || a.created_at,
+      endedAt: room?.ended_at || null,
+      bytes: a.bytes,
+      updatedAt: a.updated_at,
+    };
+  });
+  res.json({ archives: rows });
+});
+
+app.delete('/api/archives/:roomId', requireAuth, requireOwner, (req, res) => {
+  const archive = storage.getArchive(req.params.roomId);
+  if (!archive) return res.status(404).json({ error: 'Archive not found' });
+  try { if (fs.existsSync(archive.file)) fs.unlinkSync(archive.file); } catch { /* non-fatal */ }
+  storage.deleteArchive(req.params.roomId);
+  res.json({ ok: true });
+});
+
+// Public: everything the archive page needs for one show
+app.get('/api/show/:roomId', (req, res) => {
+  const archive = storage.getArchive(req.params.roomId);
+  const room = storage.getRoom(req.params.roomId);
+  if (!archive || !room) return res.status(404).json({ error: 'Show not found' });
+  res.json({
+    id: room.id,
+    title: room.title || null,
+    description: room.description || null,
+    startedAt: room.created_at,
+    endedAt: room.ended_at || null,
+    bytes: archive.bytes,
+    tracks: storage.getTracks(room.id, 500).reverse().map((t) => ({
+      ts: t.ts,
+      text: t.title || '',
+      artist: t.artist || null,
+      trackTitle: t.track_title || null,
+      album: t.album || null,
+      cover: t.cover_url || null,
+      duration: t.duration || null,
+    })),
+    chat: storage.getChat(room.id, 500).map((c) => ({
+      ts: c.ts,
+      name: c.name,
+      text: c.text,
+      system: !!c.system,
+    })),
+  });
+});
+
+// Public: the archived MP3 itself; sendFile handles Range requests for seeking
+app.get('/api/show/:roomId/audio', (req, res) => {
+  const archive = storage.getArchive(req.params.roomId);
+  if (!archive || !fs.existsSync(archive.file)) return res.status(404).end();
+  res.sendFile(path.resolve(archive.file), {
+    headers: { 'Content-Type': 'audio/mpeg' },
+  });
 });
 
 // Room slug history — saved custom room IDs with live status
@@ -1465,6 +1830,7 @@ wss.on('connection', (ws, req) => {
           })) : undefined,
           label: str('label'),
           genres: Array.isArray(msg.genres) ? msg.genres.filter(g => typeof g === 'string').slice(0, 10) : undefined,
+          source: msg.source === 'auto' ? 'auto' : 'live',
         };
 
         rooms.addTrack(clientRoom, trackMeta);

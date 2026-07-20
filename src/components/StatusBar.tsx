@@ -11,6 +11,8 @@ interface StatusBarProps {
   elapsedSeconds?: number;
   recording?: boolean;
   recordElapsed?: number;
+  /** Hardware skin: render the elapsed timer as an LED display */
+  hardware?: boolean;
 }
 
 const statusConfig: Record<ConnectionStatus, { label: string; className: string; icon: typeof Radio }> = {
@@ -30,6 +32,7 @@ export function StatusBar({
   elapsedSeconds,
   recording,
   recordElapsed,
+  hardware,
 }: StatusBarProps) {
   const config = statusConfig[status];
   const Icon = config.icon;
@@ -60,7 +63,10 @@ export function StatusBar({
           </span>
         )}
         {onAir && typeof elapsedSeconds === 'number' && (
-          <span className="hidden sm:inline text-xs font-mono text-muted-foreground tabular-nums">
+          <span
+            className={`hidden sm:inline text-xs font-mono tabular-nums ${hardware ? 'lcd-clock' : 'text-muted-foreground'}`}
+            data-ghost={hardware ? formatClock(elapsedSeconds).replace(/\d/g, '8') : undefined}
+          >
             {formatClock(elapsedSeconds)}
           </span>
         )}
@@ -70,7 +76,7 @@ export function StatusBar({
             {listenerCount}
           </span>
         )}
-        <div className={`status-badge flex items-center gap-1.5 ${config.className}`}>
+        <div className={`status-badge flex items-center gap-1.5 ${config.className} ${onAir ? 'onair-lamp' : ''}`}>
           <Icon className="h-3 w-3" aria-hidden />
           {config.label}
         </div>

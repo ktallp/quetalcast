@@ -64,7 +64,8 @@ export default function DocsReceiver() {
           The track list shows every track played, with album artwork, duration, and release year.
           The current track is highlighted at the top. If you join mid-broadcast you still see the
           full history. Click any track for details, or download the list as CSV with the icon in
-          the header.
+          the header. The copy icon on each row copies "Artist · Title · time" to your clipboard,
+          the fastest answer to "what was that song?".
         </p>
       </section>
 
@@ -115,6 +116,11 @@ export default function DocsReceiver() {
           <strong>24 hours</strong>, so you can still browse the track list and keep chatting.
           Use <strong>Retry this broadcast</strong> if you expect them back, or paste a different
           Room ID to join another broadcast.
+        </p>
+        <p className="mt-2">
+          If the station has archiving turned on, ended shows also get a permanent page at{' '}
+          <code>/show/&lt;room&gt;</code> with the full recording, a track list you can click to
+          jump around the audio, and the chat replayed in step with playback.
         </p>
       </section>
     </div>

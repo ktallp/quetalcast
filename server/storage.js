@@ -51,9 +51,36 @@ CREATE TABLE IF NOT EXISTS tracks (
   album TEXT,
   year TEXT,
   cover_url TEXT,
-  source TEXT
+  source TEXT,
+  track_title TEXT,
+  isrc TEXT,
+  label TEXT,
+  duration INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_tracks_room ON tracks (room_id, ts);
+
+CREATE TABLE IF NOT EXISTS listener_sessions (
+  room_id TEXT NOT NULL,
+  transport TEXT NOT NULL CHECK (transport IN ('webrtc', 'relay')),
+  joined_at INTEGER NOT NULL,
+  left_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_lsessions_room ON listener_sessions (room_id, joined_at);
+CREATE INDEX IF NOT EXISTS idx_lsessions_joined ON listener_sessions (joined_at);
+
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS archives (
+  room_id TEXT PRIMARY KEY,
+  file TEXT NOT NULL,
+  bytes INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS chat (
   room_id TEXT NOT NULL,
@@ -102,8 +129,46 @@ export class Storage {
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('synchronous = NORMAL');
     this.db.exec(SCHEMA);
+    this._ensureTrackColumns();
     this._migrateSlugFile();
+    this._closeOrphanListenerSessions();
     logger?.info({ dbPath: this.dbPath }, 'SQLite storage ready');
+  }
+
+  /** Add track metadata columns to databases created before they existed */
+  _ensureTrackColumns() {
+    const existing = new Set(this.db.pragma('table_info(tracks)').map((c) => c.name));
+    const wanted = [
+      ['track_title', 'TEXT'],
+      ['isrc', 'TEXT'],
+      ['label', 'TEXT'],
+      ['duration', 'INTEGER'],
+    ];
+    for (const [name, type] of wanted) {
+      if (!existing.has(name)) {
+        this.db.exec(`ALTER TABLE tracks ADD COLUMN ${name} ${type}`);
+        this.logger?.info({ column: name }, 'Added tracks column');
+      }
+    }
+  }
+
+  /**
+   * Sessions left open by a crash or restart have no real end time.
+   * Close them conservatively at the room's last listener sample after the
+   * join (or at joined_at when no sample exists) so listening hours are
+   * never overstated.
+   */
+  _closeOrphanListenerSessions() {
+    const info = this.db.prepare(`
+      UPDATE listener_sessions SET left_at = COALESCE(
+        (SELECT MAX(ls.ts) FROM listener_samples ls
+          WHERE ls.room_id = listener_sessions.room_id AND ls.ts >= joined_at),
+        joined_at)
+      WHERE left_at IS NULL
+    `).run();
+    if (info.changes > 0) {
+      this.logger?.info({ closed: info.changes }, 'Closed orphaned listener sessions');
+    }
   }
 
   /** One-time migration of the legacy data/room-slugs.json file into the slugs table */
@@ -283,6 +348,7 @@ export class Storage {
     this.db.prepare('DELETE FROM tracks WHERE room_id = ?').run(id);
     this.db.prepare('DELETE FROM chat WHERE room_id = ?').run(id);
     this.db.prepare('DELETE FROM listener_samples WHERE room_id = ?').run(id);
+    this.db.prepare('DELETE FROM listener_sessions WHERE room_id = ?').run(id);
   }
 
   updatePeakListeners(id, count) {
@@ -300,14 +366,116 @@ export class Storage {
 
   // ----------------------------------------------------------------- tracks
 
-  insertTrack(roomId, { ts, title, artist, album, year, coverUrl, source }) {
+  insertTrack(roomId, { ts, title, artist, album, year, coverUrl, source, trackTitle, isrc, label, duration }) {
     this.db.prepare(
-      'INSERT INTO tracks (room_id, ts, title, artist, album, year, cover_url, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-    ).run(roomId, ts, title || null, artist || null, album || null, year || null, coverUrl || null, source || null);
+      `INSERT INTO tracks (room_id, ts, title, artist, album, year, cover_url, source, track_title, isrc, label, duration)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      roomId, ts, title || null, artist || null, album || null, year || null, coverUrl || null, source || null,
+      trackTitle || null, isrc || null, label || null, Number.isFinite(duration) ? Math.round(duration) : null
+    );
   }
 
   getTracks(roomId, limit = 100) {
     return this.db.prepare('SELECT * FROM tracks WHERE room_id = ? ORDER BY ts DESC LIMIT ?').all(roomId, limit);
+  }
+
+  /** All tracks played in [startTs, endTs), oldest first, for reporting */
+  getTracksInRange(startTs, endTs) {
+    return this.db.prepare(
+      'SELECT rowid AS id, * FROM tracks WHERE ts >= ? AND ts < ? ORDER BY ts ASC'
+    ).all(startTs, endTs);
+  }
+
+  /** Update reporting metadata on a single track row (the ISRC fix-up flow) */
+  updateTrackReportingMeta(id, { trackTitle, artist, album, label, isrc, duration }) {
+    this.db.prepare(
+      `UPDATE tracks SET track_title = ?, artist = ?, album = ?, label = ?, isrc = ?, duration = ?
+       WHERE rowid = ?`
+    ).run(
+      trackTitle || null, artist || null, album || null, label || null, isrc || null,
+      Number.isFinite(duration) ? Math.round(duration) : null, id
+    );
+  }
+
+  // ------------------------------------------------------ listener sessions
+
+  /** Open a listener session; returns the session row id used to close it */
+  openListenerSession(roomId, transport, ts) {
+    const info = this.db.prepare(
+      'INSERT INTO listener_sessions (room_id, transport, joined_at) VALUES (?, ?, ?)'
+    ).run(roomId, transport, ts);
+    return info.lastInsertRowid;
+  }
+
+  closeListenerSession(sessionId, ts) {
+    if (!sessionId) return;
+    this.db.prepare(
+      'UPDATE listener_sessions SET left_at = ? WHERE rowid = ? AND left_at IS NULL'
+    ).run(ts, sessionId);
+  }
+
+  /** Close every still-open session for a room (room ended or reclaimed) */
+  closeRoomListenerSessions(roomId, ts) {
+    this.db.prepare(
+      'UPDATE listener_sessions SET left_at = ? WHERE room_id = ? AND left_at IS NULL'
+    ).run(ts, roomId);
+  }
+
+  /** Sessions overlapping [startTs, endTs), for performance and ATH queries */
+  getListenerSessionsInRange(startTs, endTs) {
+    return this.db.prepare(
+      `SELECT room_id, transport, joined_at, left_at FROM listener_sessions
+       WHERE joined_at < ? AND COALESCE(left_at, ?) > ?`
+    ).all(endTs, endTs, startTs);
+  }
+
+  // --------------------------------------------------------------- archives
+
+  upsertArchive(roomId, file) {
+    const now = Date.now();
+    this.db.prepare(
+      `INSERT INTO archives (room_id, file, bytes, created_at, updated_at) VALUES (?, ?, 0, ?, ?)
+       ON CONFLICT(room_id) DO UPDATE SET updated_at = excluded.updated_at`
+    ).run(roomId, file, now, now);
+  }
+
+  updateArchiveBytes(roomId, bytes) {
+    this.db.prepare('UPDATE archives SET bytes = ?, updated_at = ? WHERE room_id = ?').run(bytes, Date.now(), roomId);
+  }
+
+  getArchive(roomId) {
+    return this.db.prepare('SELECT * FROM archives WHERE room_id = ?').get(roomId) || null;
+  }
+
+  listArchives() {
+    return this.db.prepare('SELECT * FROM archives ORDER BY updated_at DESC').all();
+  }
+
+  deleteArchive(roomId) {
+    this.db.prepare('DELETE FROM archives WHERE room_id = ?').run(roomId);
+  }
+
+  // --------------------------------------------------------------- settings
+
+  getSetting(key) {
+    const row = this.db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
+    return row ? row.value : null;
+  }
+
+  setSetting(key, value) {
+    this.db.prepare(
+      `INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+    ).run(key, value == null ? null : String(value), Date.now());
+  }
+
+  getAllSettings() {
+    const out = {};
+    for (const row of this.db.prepare('SELECT key, value FROM settings').all()) {
+      out[row.key] = row.value;
+    }
+    return out;
   }
 
   // ------------------------------------------------------------------- chat
@@ -333,6 +501,16 @@ export class Storage {
     return this.db.prepare(
       'SELECT ts, count FROM listener_samples WHERE room_id = ? AND ts >= ? ORDER BY ts ASC'
     ).all(roomId, sinceTs);
+  }
+
+  getListenerSamplesBetween(roomId, startTs, endTs) {
+    return this.db.prepare(
+      'SELECT ts, count FROM listener_samples WHERE room_id = ? AND ts >= ? AND ts <= ? ORDER BY ts ASC'
+    ).all(roomId, startTs, endTs);
+  }
+
+  countTracks(roomId) {
+    return this.db.prepare('SELECT COUNT(*) AS n FROM tracks WHERE room_id = ?').get(roomId).n;
   }
 
   getPeakListenersSince(sinceTs) {

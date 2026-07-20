@@ -6,6 +6,7 @@ import Login from "./pages/Login";
 import Join from "./pages/Join";
 import Broadcaster from "./pages/Broadcaster";
 import Receiver from "./pages/Receiver";
+import ShowArchive from "./pages/ShowArchive";
 import Admin from "./pages/Admin";
 import DocsLayout from "./pages/docs/DocsLayout";
 import DocsOverview from "./pages/docs/Overview";
@@ -27,6 +28,7 @@ const App = () => (
           <Route path="/broadcast" element={<Broadcaster />} />
           <Route path="/receive" element={<Receiver />} />
           <Route path="/receive/:roomId" element={<Receiver />} />
+          <Route path="/show/:roomId" element={<ShowArchive />} />
           <Route path="/admin" element={<Admin />} />
           <Route path="/changelog" element={<Changelog />} />
           <Route path="/docs" element={<DocsLayout />}>

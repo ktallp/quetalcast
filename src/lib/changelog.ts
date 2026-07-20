@@ -12,6 +12,25 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    date: '2026-07-19',
+    version: '0.7.0',
+    items: [
+      'Setlist: the track search now works off-air and builds a show plan; queued tracks keep their full metadata and publish to the live track list with "Mark played" once you are on air',
+      'Show report: when a broadcast ends, a report shows the listener curve, peak, average, time on air, and tracks played, with a CSV export of the per-minute listener counts',
+      'SoundExchange compliance: a new owner-only Compliance tab in Admin builds Reports of Use per quarter (artist, title, ISRC, album, label, performances), tracks aggregate tuning hours from a new listener session log, flags tracks missing an ISRC with a two-click Deezer fix-up, and exports a playlist CSV',
+      'Show archive: optionally record every broadcast server-side and publish a public page at /show/<room> with the recording, a click-to-jump track list, and chat replayed in step with playback; retention is capped from the new Archives tab',
+      'Auto-identify is now strictly per-session: off by default, enabled by a checkbox in the broadcast settings dialog ("Automatically identify songs for reporting") or the ear toggle, and always reset when the broadcast ends; identified songs are matched to ISRCs via Deezer for reporting',
+      'Hardware look: an optional console skin (gauge icon in the header, off by default) with analog VU needles, cart-style sound pads, backlit latching transport switches, and an LED elapsed-time display',
+      'Track rows can be tapped to copy "Artist · Title · time" for answering "what was that song?"',
+      'Mixer strips show an amber DUCK indicator while auto-duck is actively dipping music under the mic',
+      'The ON AIR badge is now a proper lamp: lit from within and readable across a room',
+    ],
+    fixes: [
+      'Auto-identified tracks now carry their song title, album, label, and ISRC into the track list and persisted history (previously only the display text survived)',
+      'Track metadata (ISRC, label, duration, song title) is now persisted to the database instead of living only in server memory',
+    ],
+  },
+  {
     date: '2026-07-18',
     version: '0.6.2',
     items: [

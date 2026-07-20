@@ -92,6 +92,49 @@ export default function DocsAdmin() {
           </li>
         </ul>
       </section>
+
+      <section>
+        <h2 className="text-lg font-semibold text-foreground mb-3">Compliance</h2>
+        <p>
+          The owner-only <strong>Compliance</strong> tab prepares SoundExchange Reports of Use.
+          Pick a quarter and it aggregates every persisted track into unique recordings with
+          artist, title, ISRC, album, marketing label, spins, and performances (listeners whose
+          sessions overlapped each play), plus aggregate tuning hours from the listener session
+          log the server keeps for both browser and media-player listeners.
+        </p>
+        <ul className="list-disc list-inside mt-2 space-y-1 pl-1">
+          <li>
+            <strong>Service name and license category</strong> are set once at the top and stamped
+            onto every export.
+          </li>
+          <li>
+            <strong>Need ISRC</strong> counts tracks that lack both an ISRC and an album + label
+            pair. The <strong>Fix</strong> button on each one searches Deezer and attaches the
+            right recording's metadata in two clicks. Freeform and auto-identified entries are the
+            usual culprits.
+          </li>
+          <li>
+            <strong>Download Report of Use</strong> exports a tab-delimited file with
+            SoundExchange's field names; <strong>Playlist CSV</strong> exports one row per spin.
+          </li>
+        </ul>
+        <p className="mt-2">
+          Verify the current ROU template and your license category against your SoundExchange
+          agreement before filing. The tab prepares the data; it is not legal advice.
+        </p>
+      </section>
+
+      <section>
+        <h2 className="text-lg font-semibold text-foreground mb-3">Archives</h2>
+        <p>
+          The owner-only <strong>Archives</strong> tab turns on server-side recording: every
+          broadcast's relay MP3 is teed to the data volume and published at{' '}
+          <code>/show/&lt;room&gt;</code> as a public page with the recording, a click-to-jump
+          track list, and chat replay. A retention cap (default 10 shows) deletes the oldest
+          recordings automatically; individual archives can be opened or deleted from the list.
+          Archiving applies to broadcasts started after it is switched on.
+        </p>
+      </section>
     </div>
   );
 }

@@ -45,9 +45,11 @@ interface NowPlayingInputProps {
   onCommit: (meta: TrackMeta) => void;
   /** When true, input is disabled and click shows "Go on air first to add tracks" */
   disabled?: boolean;
+  /** Toast shown on commit; lets the setlist mode say where the track went */
+  toastLabel?: string;
 }
 
-export function NowPlayingInput({ value, onChange, onCommit, disabled }: NowPlayingInputProps) {
+export function NowPlayingInput({ value, onChange, onCommit, disabled, toastLabel = 'Added to track list' }: NowPlayingInputProps) {
   const [query, setQuery] = useState(value);
   const [results, setResults] = useState<DeezerResult[]>([]);
   const [open, setOpen] = useState(false);
@@ -142,9 +144,9 @@ export function NowPlayingInput({ value, onChange, onCommit, disabled }: NowPlay
       onChange({ text: '' });
       setResults([]);
       setOpen(false);
-      toast('Added to track list', { duration: 2000 });
+      toast(toastLabel, { duration: 2000 });
     }
-  }, [onCommit, onChange]);
+  }, [onCommit, onChange, toastLabel]);
 
   /** Simple commit for freeform text (Enter key) */
   const commitFreeform = useCallback((text: string) => {
@@ -156,9 +158,9 @@ export function NowPlayingInput({ value, onChange, onCommit, disabled }: NowPlay
       onChange({ text: '' });
       setResults([]);
       setOpen(false);
-      toast('Added to track list', { duration: 2000 });
+      toast(toastLabel, { duration: 2000 });
     }
-  }, [onCommit, onChange]);
+  }, [onCommit, onChange, toastLabel]);
 
   const handleInput = (val: string) => {
     setQuery(val);

@@ -10,8 +10,9 @@ import { HealthPanel } from '@/components/HealthPanel';
 import { EventLog, createLogEntry, type LogEntry } from '@/components/EventLog';
 import {
   Mic, Radio, Music, Sparkles, Zap, Plug2, Keyboard, Monitor, MonitorOff,
-  Download, SlidersHorizontal, Copy, ListMusic, ScrollText, Ear, Shield, LogOut,
+  Download, SlidersHorizontal, Copy, ListMusic, ScrollText, Ear, Shield, LogOut, Gauge,
 } from 'lucide-react';
+import { useHardwareSkin } from '@/hooks/useHardwareSkin';
 import { toast } from '@/components/ui/sonner';
 import {
   Select,
@@ -24,6 +25,8 @@ import { useAudioMixer } from '@/hooks/useAudioMixer';
 import { useMicEffects } from '@/hooks/useMicEffects';
 import { SoundBoard } from '@/components/SoundBoard';
 import { NowPlayingInput, type NowPlayingMeta, type TrackMeta } from '@/components/NowPlayingInput';
+import { Setlist, type SetlistItem } from '@/components/Setlist';
+import { ShowReport } from '@/components/ShowReport';
 import { TrackList, type Track } from '@/components/TrackList';
 import { EffectsBoard } from '@/components/EffectsBoard';
 import { Footer } from '@/components/Footer';
@@ -67,7 +70,22 @@ const WS_URL = import.meta.env.VITE_WS_URL || (
 
 const BROADCASTER_LAYOUT_STORAGE_KEY = 'quetalcast:broadcaster-layout:v1';
 const ACTIVE_BROADCAST_KEY = 'quetalcast:active-broadcast';
+const SETLIST_STORAGE_KEY = 'quetalcast:setlist:v1';
 const API_BASE = import.meta.env.VITE_API_URL || '';
+
+function readStoredSetlist(): SetlistItem[] {
+  try {
+    const raw = localStorage.getItem(SETLIST_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((item): item is SetlistItem =>
+      !!item && typeof item === 'object' && typeof item.id === 'string' && typeof item.text === 'string'
+    );
+  } catch {
+    return [];
+  }
+}
 
 type SideTab = 'sounds' | 'effects' | 'tracks' | 'log';
 
@@ -91,7 +109,6 @@ type PersistedBroadcasterLayout = {
   padsMonitor: boolean;
   duckPads: boolean;
   duckSystem: boolean;
-  autoIdentify: boolean;
   selectedDevice: string;
   sideTab: SideTab;
   effects: Record<EffectName, { enabled: boolean; params: Record<string, number> }>;
@@ -130,6 +147,10 @@ const Broadcaster = () => {
   const [, setNowPlayingCover] = useState<string | undefined>();
   const nowPlayingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [trackList, setTrackList] = useState<Track[]>([]);
+  const [setlist, setSetlist] = useState<SetlistItem[]>(() => readStoredSetlist());
+  const [showReportOpen, setShowReportOpen] = useState(false);
+  const [reportRoomId, setReportRoomId] = useState<string | null>(null);
+  const [hardwareSkin, setHardwareSkin] = useHardwareSkin();
   const [presets, setPresets] = useState<Preset[]>([]);
   const [savePresetOpen, setSavePresetOpen] = useState(false);
   const [newPresetName, setNewPresetName] = useState('');
@@ -559,8 +580,12 @@ const Broadcaster = () => {
   const handlePreBroadcastStart = useCallback(async (settings: BroadcastSettings) => {
     setPreBroadcastOpen(false);
     pendingBroadcastSettingsRef.current = settings;
+    setAutoIdentifyOn(Boolean(settings.autoIdentify));
+    if (settings.autoIdentify) {
+      addLog('Auto-identify on for this session: recognized songs are added to the track list');
+    }
     await doGoOnAir();
-  }, [doGoOnAir]);
+  }, [doGoOnAir, addLog]);
 
   const handlePreBroadcastSkip = useCallback(async () => {
     setPreBroadcastOpen(false);
@@ -694,15 +719,42 @@ const Broadcaster = () => {
     }
   }, [integrationStream.relayStatus, addLog]);
 
-  // Auto-identify: fingerprint the broadcast and add recognized songs to the track list
+  // Auto-identify: fingerprint the broadcast and add recognized songs to the track list.
+  // Matches are enriched through the Deezer proxies so they carry the ISRC, album,
+  // and label that compliance reporting needs; enrichment is best-effort.
   useAutoIdentify({
     stream: isOnAir && autoIdentifyOn ? mixer.mixedStream : null,
     enabled: isOnAir && autoIdentifyOn && autoIdentifyAvailable,
     existingTitles: trackList.map((t) => t.title),
-    onMatch: (match) => {
+    onMatch: async (match) => {
       const text = `${match.artist} - ${match.title}`;
-      signaling.send({ type: 'add-track', text, artist: match.artist, trackTitle: match.title });
       addLog(`Auto-identified: ${text}`);
+      const base = { type: 'add-track', text, artist: match.artist, title: match.title, source: 'auto' };
+      try {
+        const searchRes = await fetch(`/api/music-search?q=${encodeURIComponent(`${match.artist} ${match.title}`)}`);
+        const search = await searchRes.json();
+        const hit = Array.isArray(search?.data) ? search.data[0] : null;
+        if (hit?.id) {
+          const detailRes = await fetch(`/api/music-detail/${hit.id}`);
+          const detail = (await detailRes.json())?.data;
+          if (detail) {
+            signaling.send({
+              ...base,
+              album: detail.album || undefined,
+              duration: detail.duration || undefined,
+              releaseDate: detail.releaseDate || undefined,
+              isrc: detail.isrc || undefined,
+              label: detail.label || undefined,
+              cover: detail.cover || hit.cover || undefined,
+              coverMedium: detail.coverMedium || hit.coverMedium || undefined,
+            });
+            return;
+          }
+        }
+      } catch {
+        // Fall through and add the bare match
+      }
+      signaling.send(base);
     },
   });
 
@@ -732,6 +784,7 @@ const Broadcaster = () => {
 
   const handleEndBroadcast = useCallback(() => {
     const wasRecording = recorder.recording;
+    const endedRoomId = webrtc.roomId;
 
     // If recording, keep mixer/mic connected so recording continues until user stops
     if (!wasRecording) {
@@ -757,8 +810,16 @@ const Broadcaster = () => {
     relayStream.stopRelay();
 
     setIsOnAir(false);
+    // Identification consent is per-session; it never carries into the next broadcast
+    setAutoIdentifyOn(false);
     localStorage.removeItem(ACTIVE_BROADCAST_KEY);
     addLog('Off air');
+
+    // Give the samples a beat to land, then show the report for the ended room
+    if (endedRoomId) {
+      setReportRoomId(endedRoomId);
+      setTimeout(() => setShowReportOpen(true), 800);
+    }
   }, [recorder.recording, micEffects, localStream, mixer, systemAudioActive, webrtc, selectedIntegration, integrationStream, relayStream, addLog]);
 
   // --- Mixer control handlers ---
@@ -870,6 +931,26 @@ const Broadcaster = () => {
       signaling.send(payload);
     }, 500);
   };
+
+  // Setlist: plan tracks off-air (or mid-show) and publish them as they air
+  useEffect(() => {
+    try {
+      localStorage.setItem(SETLIST_STORAGE_KEY, JSON.stringify(setlist));
+    } catch {
+      // Ignore quota errors and keep runtime behavior intact.
+    }
+  }, [setlist]);
+
+  const handleSetlistMarkPlayed = useCallback((item: SetlistItem) => {
+    if (!isOnAir) {
+      toast.info('Go on air to publish setlist tracks');
+      return;
+    }
+    const { id, ...meta } = item;
+    signaling.send({ type: 'add-track', ...meta });
+    addLog(`Added to track list: ${meta.text || meta.title || 'Unknown'}`, 'info');
+    setSetlist((prev) => prev.filter((s) => s.id !== id));
+  }, [isOnAir, signaling, addLog]);
 
   const handleLimiterChange = (value: string) => {
     const db = Number(value) as 0 | -3 | -6 | -12;
@@ -1032,7 +1113,7 @@ const Broadcaster = () => {
     if (typeof saved.padsMonitor === 'boolean') setPadsMonitor(saved.padsMonitor);
     if (typeof saved.duckPads === 'boolean') setDuckPads(saved.duckPads);
     if (typeof saved.duckSystem === 'boolean') setDuckSystem(saved.duckSystem);
-    if (typeof saved.autoIdentify === 'boolean') setAutoIdentifyOn(saved.autoIdentify);
+    // autoIdentify is intentionally NOT restored: identification consent is per-session
 
     if (saved.sideTab && ['sounds', 'effects', 'tracks', 'log'].includes(saved.sideTab)) {
       setSideTab(saved.sideTab);
@@ -1064,7 +1145,6 @@ const Broadcaster = () => {
       padsMonitor,
       duckPads,
       duckSystem,
-      autoIdentify: autoIdentifyOn,
       selectedDevice,
       sideTab,
       effects: micEffects.effects,
@@ -1094,7 +1174,6 @@ const Broadcaster = () => {
     padsMonitor,
     duckPads,
     duckSystem,
-    autoIdentifyOn,
     selectedDevice,
     sideTab,
     micEffects.effects,
@@ -1183,6 +1262,7 @@ const Broadcaster = () => {
         integrationName={isOnAir && integrationInfo ? integrationInfo.name : undefined}
         listenerCount={isOnAir ? listenerCount : undefined}
         elapsedSeconds={isOnAir ? elapsedSeconds : undefined}
+        hardware={hardwareSkin}
         recording={recorder.recording}
         recordElapsed={recorder.elapsed}
       />
@@ -1221,6 +1301,20 @@ const Broadcaster = () => {
                 <Ear className="h-4 w-4" aria-hidden />
               </button>
             )}
+            <button
+              onClick={() => {
+                setHardwareSkin(!hardwareSkin);
+                addLog(hardwareSkin ? 'Hardware look off' : 'Hardware look on: analog VU, carts, backlit switches');
+              }}
+              aria-pressed={hardwareSkin}
+              aria-label={hardwareSkin ? 'Switch back to the minimal look' : 'Switch to the hardware look'}
+              className={`transition-colors ${
+                hardwareSkin ? 'text-accent' : 'text-muted-foreground/40 hover:text-muted-foreground'
+              }`}
+              title={hardwareSkin ? 'Hardware look is on' : 'Hardware look: analog VU, cart pads, backlit switches'}
+            >
+              <Gauge className="h-4 w-4" aria-hidden />
+            </button>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
             {!isOnAir && (
@@ -1280,9 +1374,11 @@ const Broadcaster = () => {
               left={audioAnalysis.left}
               right={audioAnalysis.right}
               label="Input Level"
+              hardware={hardwareSkin}
             />
 
             <TransportBar
+              hardware={hardwareSkin}
               isOnAir={isOnAir}
               goingOnAir={goingOnAir}
               canGoOnAir={signaling.connected}
@@ -1447,6 +1543,7 @@ const Broadcaster = () => {
                       connectElement={mixer.connectElement}
                       triggerRef={soundboardTriggerRef}
                       onPadPlayback={(title, playing) => addLog(playing ? `▶ ${title}` : `■ ${title}`)}
+                      hardware={hardwareSkin}
                     />
                   ),
                 },
@@ -1477,19 +1574,33 @@ const Broadcaster = () => {
                       bare
                       roomId={webrtc.roomId ?? undefined}
                       topContent={
-                        <NowPlayingInput
-                          value={nowPlaying}
-                          onChange={handleNowPlayingChange}
-                          onCommit={(meta: TrackMeta) => {
-                            if (isOnAir) {
-                              signaling.send({ type: 'add-track', ...meta });
-                              addLog(`Added to track list: ${meta.text || meta.title || 'Unknown'}`, 'info');
-                            } else {
-                              toast.info('Go on air first to add tracks');
-                            }
-                          }}
-                          disabled={!isOnAir}
-                        />
+                        <div className="space-y-3">
+                          <NowPlayingInput
+                            value={nowPlaying}
+                            onChange={handleNowPlayingChange}
+                            onCommit={(meta: TrackMeta) => {
+                              if (isOnAir) {
+                                signaling.send({ type: 'add-track', ...meta });
+                                addLog(`Added to track list: ${meta.text || meta.title || 'Unknown'}`, 'info');
+                              } else {
+                                setSetlist((prev) => [...prev, { ...meta, id: crypto.randomUUID() }]);
+                              }
+                            }}
+                            toastLabel={isOnAir ? 'Added to track list' : 'Added to setlist'}
+                          />
+                          {!isOnAir && setlist.length === 0 && (
+                            <p className="text-[10px] text-muted-foreground/60">
+                              Off air, searches build a setlist that publishes once you go live
+                            </p>
+                          )}
+                          <Setlist
+                            items={setlist}
+                            canPublish={isOnAir}
+                            onMarkPlayed={handleSetlistMarkPlayed}
+                            onRemove={(id) => setSetlist((prev) => prev.filter((s) => s.id !== id))}
+                            onClear={() => setSetlist([])}
+                          />
+                        </div>
                       }
                     />
                   ),
@@ -1735,7 +1846,11 @@ const Broadcaster = () => {
         onOpenChange={setPreBroadcastOpen}
         onStart={handlePreBroadcastStart}
         onSkip={handlePreBroadcastSkip}
+        showAutoIdentify={autoIdentifyAvailable}
+        defaultAutoIdentify={autoIdentifyOn}
       />
+
+      <ShowReport roomId={reportRoomId} open={showReportOpen} onOpenChange={setShowReportOpen} />
 
       {/* Broadcast recovery dialog */}
       <Dialog open={recoveryDialogOpen} onOpenChange={(open) => { if (!open) handleDismissRecovery(); }}>

@@ -35,6 +35,8 @@ interface TransportBarProps {
   onToggleCue: () => void;
   limiterDb: 0 | -3 | -6 | -12;
   onLimiterChange: (value: string) => void;
+  /** Hardware skin: render Rec/Mute/Listen/Cue as backlit latching switches */
+  hardware?: boolean;
 }
 
 /**
@@ -63,10 +65,16 @@ export function TransportBar(props: TransportBarProps) {
     onToggleCue,
     limiterDb,
     onLimiterChange,
+    hardware,
   } = props;
 
   const toggleBtn = (activeClass: string) =>
     `flex items-center gap-1.5 px-3 py-2 rounded-md text-xs font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed ${activeClass}`;
+
+  // Hardware skin: the button becomes the switch housing, the inner span its lamp face
+  const hwBtn = (on: boolean, colorClass: string) =>
+    `hw-switch text-xs font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed ${on ? colorClass : ''}`;
+  const faceClass = hardware ? 'hw-lampface' : 'contents';
 
   return (
     <div className="panel space-y-3">
@@ -112,59 +120,67 @@ export function TransportBar(props: TransportBarProps) {
           disabled={!recording && !canRecord}
           aria-pressed={recording}
           aria-label={recording ? 'Stop recording' : 'Start recording'}
-          className={toggleBtn(
+          className={hardware ? hwBtn(recording, 'hw-on-red') : toggleBtn(
             recording
               ? 'bg-red-500/20 text-red-500 hover:bg-red-500/30'
               : 'bg-secondary text-muted-foreground hover:text-foreground',
           )}
           title={recording ? recordLabel : 'Record the broadcast as a 320 kbps MP3'}
         >
-          {recording ? (
-            <>
-              <Square className="h-3.5 w-3.5 fill-current" aria-hidden />
-              <span className="font-mono tabular-nums">{formatClock(recordElapsed)}</span>
-            </>
-          ) : (
-            <>
-              <Circle className="h-3.5 w-3.5 fill-current" aria-hidden />
-              Rec
-            </>
-          )}
+          <span className={faceClass}>
+            {recording ? (
+              <>
+                <Square className="h-3.5 w-3.5 fill-current" aria-hidden />
+                <span className="font-mono tabular-nums">{formatClock(recordElapsed)}</span>
+              </>
+            ) : (
+              <>
+                <Circle className="h-3.5 w-3.5 fill-current" aria-hidden />
+                Rec
+              </>
+            )}
+          </span>
         </button>
         <button
           onClick={onToggleMute}
           disabled={!isOnAir}
           aria-pressed={muted}
-          className={toggleBtn(
+          className={hardware ? hwBtn(muted, 'hw-on-blue') : toggleBtn(
             muted ? 'bg-destructive/20 text-destructive' : 'bg-secondary text-muted-foreground hover:text-foreground',
           )}
           title={muted ? 'Unmute all channels (Space)' : 'Mute all channels (Space)'}
         >
-          <MicOff className="h-3.5 w-3.5" aria-hidden />
-          {muted ? 'Muted' : 'Mute'}
+          <span className={faceClass}>
+            <MicOff className="h-3.5 w-3.5" aria-hidden />
+            {muted ? 'Muted' : 'Mute'}
+          </span>
         </button>
         <button
           onClick={onToggleListen}
           disabled={!isOnAir}
           aria-pressed={listening}
-          className={toggleBtn(
+          className={hardware ? hwBtn(listening, 'hw-on-green') : toggleBtn(
             listening ? 'bg-primary/20 text-primary' : 'bg-secondary text-muted-foreground hover:text-foreground',
           )}
           title={listening ? 'Stop listening (L)' : 'Listen to your broadcast (L)'}
         >
-          <Headphones className="h-3.5 w-3.5" aria-hidden />
-          Listen
+          <span className={faceClass}>
+            <Headphones className="h-3.5 w-3.5" aria-hidden />
+            Listen
+          </span>
         </button>
         <button
           onClick={onToggleCue}
           disabled={!isOnAir}
           aria-pressed={cueMode}
-          className={`px-3 py-2 rounded-md text-xs font-mono font-bold uppercase tracking-wider transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
-            cueMode ? 'bg-accent/20 text-accent' : 'bg-secondary text-muted-foreground hover:text-foreground'
-          }`}
+          className={hardware
+            ? `${hwBtn(cueMode, 'hw-on-amber')} font-mono font-bold uppercase tracking-wider`
+            : `px-3 py-2 rounded-md text-xs font-mono font-bold uppercase tracking-wider transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
+                cueMode ? 'bg-accent/20 text-accent' : 'bg-secondary text-muted-foreground hover:text-foreground'
+              }`}
           title={cueMode ? 'Cue mode on: sounds are local only (C)' : 'Enable cue mode (C)'}
         >
-          CUE
+          <span className={faceClass}>CUE</span>
         </button>
         <div className="flex items-center gap-1.5 shrink-0 ml-auto">
           <span className="text-xs font-mono uppercase tracking-wider text-muted-foreground">Limit</span>
