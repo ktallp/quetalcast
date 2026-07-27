@@ -364,6 +364,28 @@ export class Storage {
     return this.db.prepare('SELECT * FROM rooms WHERE ended_at IS NULL OR ended_at >= ?').all(sinceTs);
   }
 
+  /**
+   * Full broadcast history for the admin panel: every room with its
+   * broadcaster username and archive info, active rooms first, then newest.
+   */
+  listRoomsWithMeta({ limit = 50, offset = 0 } = {}) {
+    return this.db.prepare(
+      `SELECT r.id, r.created_at, r.ended_at, r.title, r.description, r.owner_user_id, r.peak_listeners,
+              u.username AS username,
+              CASE WHEN a.room_id IS NULL THEN 0 ELSE 1 END AS has_archive,
+              a.bytes AS archive_bytes
+       FROM rooms r
+       LEFT JOIN users u ON u.id = r.owner_user_id
+       LEFT JOIN archives a ON a.room_id = r.id
+       ORDER BY (r.ended_at IS NULL) DESC, r.created_at DESC
+       LIMIT ? OFFSET ?`
+    ).all(limit, offset);
+  }
+
+  countRooms() {
+    return this.db.prepare('SELECT COUNT(*) AS n FROM rooms').get().n;
+  }
+
   // ----------------------------------------------------------------- tracks
 
   insertTrack(roomId, { ts, title, artist, album, year, coverUrl, source, trackTitle, isrc, label, duration }) {

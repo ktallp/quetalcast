@@ -533,10 +533,19 @@ export class RoomManager {
     return room ? room.integrationInfo : null;
   }
 
-  addRelayListener(roomId, res) {
+  /**
+   * Attach a relay listener. Pass countSession: false for admin monitoring so
+   * the connection never lands in listener_sessions (royalty reporting reads
+   * that table and must only count real listeners).
+   */
+  addRelayListener(roomId, res, { countSession = true } = {}) {
     const room = this.rooms.get(roomId);
     if (!room) return false;
     room.relayListeners.add(res);
+    if (!countSession) {
+      res._listenerSessionId = null;
+      return true;
+    }
     try {
       res._listenerSessionId = this.storage?.openListenerSession(roomId, 'relay', Date.now()) || null;
     } catch (err) {

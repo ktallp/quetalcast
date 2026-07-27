@@ -4,6 +4,7 @@ import { isAuthenticated, isOwner, logout, verifySession } from '@/lib/auth';
 import { Shield, Radio, LogOut } from 'lucide-react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { RoomsPanel, type AdminRoom, type RoomStats } from '@/components/admin/RoomsPanel';
+import { BroadcastsPanel } from '@/components/admin/BroadcastsPanel';
 import { UsersPanel } from '@/components/admin/UsersPanel';
 import { CompliancePanel } from '@/components/admin/CompliancePanel';
 import { ArchivesPanel } from '@/components/admin/ArchivesPanel';
@@ -90,6 +91,7 @@ const Admin = () => {
         <Tabs defaultValue="rooms">
           <TabsList>
             <TabsTrigger value="rooms">Rooms</TabsTrigger>
+            <TabsTrigger value="broadcasts">Broadcasts</TabsTrigger>
             {owner && <TabsTrigger value="users">Users</TabsTrigger>}
             {owner && <TabsTrigger value="compliance">Compliance</TabsTrigger>}
             {owner && <TabsTrigger value="archives">Archives</TabsTrigger>}
@@ -104,6 +106,10 @@ const Admin = () => {
               isOwner={owner}
               onRefresh={poll}
             />
+          </TabsContent>
+
+          <TabsContent value="broadcasts" className="mt-4">
+            <BroadcastsPanel isOwner={owner} />
           </TabsContent>
 
           {owner && (

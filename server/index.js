@@ -821,13 +821,19 @@ app.get('/stream/:roomId', (req, res) => {
     res.write(room.relayHeader);
   }
 
-  const added = rooms.addRelayListener(roomId, writer);
+  // monitor=1 from a logged-in admin listens without opening a listener
+  // session, so SoundExchange reporting never counts our own monitoring.
+  // An unauthenticated monitor=1 is ignored and counted as a normal listener.
+  const monitorToken = req.query.monitor ? req.cookies?.session : null;
+  const isMonitor = !!(monitorToken && sessions.validate(monitorToken));
+
+  const added = rooms.addRelayListener(roomId, writer, { countSession: !isMonitor });
   if (!added) {
     res.end();
     return;
   }
 
-  logger.info({ roomId: roomId.slice(0, 8), format: usesMp3 ? 'mp3' : 'webm', icyMeta: wantsIcyMeta }, 'Relay listener connected');
+  logger.info({ roomId: roomId.slice(0, 8), format: usesMp3 ? 'mp3' : 'webm', icyMeta: wantsIcyMeta, monitor: isMonitor }, 'Relay listener connected');
 
   const cleanupListener = () => {
     if (writer.dead) return;
@@ -885,6 +891,41 @@ app.get('/admin/rooms', requireAuth, (req, res) => {
     },
     rooms: roomList,
   });
+});
+
+// Full broadcast history from the database, active rooms first, with the
+// in-memory live state overlaid on rooms the server still holds.
+app.get('/admin/broadcasts', requireAuth, (req, res) => {
+  const now = Date.now();
+  const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 50));
+  const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+
+  const broadcasts = storage.listRoomsWithMeta({ limit, offset }).map((row) => {
+    const mem = rooms.rooms.get(row.id);
+    // A row with no ended_at whose room is gone from memory is stale (the
+    // server restarted mid-broadcast): report it ended-but-unknown, never live.
+    const live = !!mem && !mem.endedAt;
+    const broadcasterConnected = !!(mem && mem.broadcaster && mem.broadcaster.readyState === 1);
+    const receiverCount = mem ? rooms.getReceiverIds(row.id).length : 0;
+    const relayListenerCount = mem ? mem.relayListeners.size : 0;
+
+    return {
+      id: row.id,
+      title: row.title || null,
+      username: row.username || null,
+      createdAt: new Date(row.created_at).toISOString(),
+      endedAt: row.ended_at ? new Date(row.ended_at).toISOString() : null,
+      live,
+      broadcasterConnected,
+      listeners: live ? receiverCount + relayListenerCount : null,
+      peakListeners: Math.max(row.peak_listeners || 0, mem?.peakListeners || 0),
+      durationSec: Math.max(0, Math.floor(((row.ended_at ?? now) - row.created_at) / 1000)),
+      hasArchive: !!row.has_archive,
+      archiveBytes: row.archive_bytes || 0,
+    };
+  });
+
+  res.json({ total: storage.countRooms(), broadcasts });
 });
 
 // Force-end a live room (owner only): closes all sockets politely and marks it ended
