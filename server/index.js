@@ -7,7 +7,7 @@ import { spawn, execFileSync } from 'child_process';
 import crypto from 'crypto';
 import fs from 'fs';
 import { createLogger } from './logger.js';
-import { RoomManager } from './room-manager.js';
+import { RoomManager, usernameToSlug } from './room-manager.js';
 import { SessionManager, hashPassword, verifyPassword } from './auth.js';
 import { Storage } from './storage.js';
 import { testConnection, connectToServer, updateStreamMetadata, buildListenerUrl } from './integration-relay.js';
@@ -69,6 +69,25 @@ if (storage.countUsers() === 0) {
   });
   logger.info('Bootstrapped initial "admin" owner account from ADMIN_PASSWORD');
 }
+
+// Room URLs default to the broadcaster's username slug, so two usernames that
+// slugify the same would fight over one URL. New usernames are rejected on
+// collision; warn about any that predate that rule.
+function warnOnUsernameSlugCollisions() {
+  const bySlug = new Map();
+  for (const user of storage.listUsers()) {
+    const slug = usernameToSlug(user.username);
+    if (!slug) continue;
+    if (!bySlug.has(slug)) bySlug.set(slug, []);
+    bySlug.get(slug).push(user.username);
+  }
+  for (const [slug, usernames] of bySlug) {
+    if (usernames.length > 1) {
+      logger.warn({ slug, usernames }, 'Usernames share one room URL, rename all but one');
+    }
+  }
+}
+warnOnUsernameSlugCollisions();
 
 // Express setup
 const app = express();
@@ -260,6 +279,16 @@ app.delete('/api/presets/:name', requireAuth, (req, res) => {
 const INVITE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const USERNAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{1,31}$/;
 
+/** Find a user whose username claims this room slug, ignoring exceptUserId. */
+function findUserByUsernameSlug(slug, exceptUserId) {
+  if (!slug) return null;
+  for (const user of storage.listUsers()) {
+    if (exceptUserId && user.id === exceptUserId) continue;
+    if (usernameToSlug(user.username) === slug) return user;
+  }
+  return null;
+}
+
 function serializeUser(u) {
   return {
     id: u.id,
@@ -292,6 +321,12 @@ app.post('/api/users', requireAuth, requireOwner, (req, res) => {
   }
   if (storage.getUserByUsername(name)) {
     return res.status(409).json({ error: 'Username already exists' });
+  }
+  const clash = findUserByUsernameSlug(usernameToSlug(name));
+  if (clash) {
+    return res.status(409).json({
+      error: `Username conflicts with existing user "${clash.username}" (URLs are case-insensitive)`,
+    });
   }
   const id = crypto.randomUUID();
   storage.createUser({ id, username: name, role });
@@ -1512,7 +1547,19 @@ wss.on('connection', (ws, req) => {
           break;
         }
         const customId = typeof msg.customId === 'string' ? msg.customId.toLowerCase().trim() : undefined;
-        const createResult = rooms.create(customId || undefined, sessionData?.userId);
+        const broadcasterName = sessionData?.username
+          || (sessionData?.userId ? storage.getUserById(sessionData.userId)?.username : null);
+        if (customId) {
+          const reservedBy = findUserByUsernameSlug(customId, sessionData?.userId);
+          if (reservedBy) {
+            ws.send(JSON.stringify({ type: 'error', message: 'That URL is reserved by another user', code: 'SLUG_RESERVED' }));
+            logger.warn({ customId, ip }, 'Room id rejected, reserved by another username');
+            break;
+          }
+        }
+        const createResult = rooms.create(customId || undefined, sessionData?.userId, {
+          defaultId: usernameToSlug(broadcasterName || ''),
+        });
         if (!createResult.ok) {
           ws.send(JSON.stringify({ type: 'error', message: createResult.error, code: createResult.code }));
           break;

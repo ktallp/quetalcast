@@ -5,6 +5,20 @@ const MAX_RECEIVERS = 4;
 const ROOM_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const LISTENER_SAMPLE_INTERVAL_MS = 60 * 1000; // sample listener counts every 60s
 
+/**
+ * Turn a username into its room-slug form: lowercase, "." and "_" become
+ * hyphens, runs of hyphens collapse, edges trimmed. The result is not
+ * guaranteed to be a valid slug (callers check with validateCustomId).
+ */
+export function usernameToSlug(username) {
+  if (typeof username !== 'string') return '';
+  return username
+    .toLowerCase()
+    .replace(/[._]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
 export class RoomManager {
   constructor(logger, storage) {
     this.rooms = new Map();
@@ -192,41 +206,68 @@ export class RoomManager {
 
   /**
    * Validate a custom room slug.
-   * Allowed: lowercase letters, digits, hyphens. 3-40 chars. No leading/trailing hyphens.
+   * Allowed: lowercase letters, digits, hyphens. 2-40 chars. No leading/trailing hyphens.
    * Returns null if valid, or an error string if invalid.
    */
   static validateCustomId(id) {
     if (typeof id !== 'string') return 'Room ID must be a string';
-    if (id.length < 3 || id.length > 40) return 'Room ID must be 3-40 characters';
-    if (!/^[a-z0-9][a-z0-9-]*[a-z0-9]$/.test(id) && id.length >= 3) return 'Only lowercase letters, numbers, and hyphens allowed (no leading/trailing hyphens)';
+    if (id.length < 2 || id.length > 40) return 'Room ID must be 2-40 characters';
+    if (!/^[a-z0-9][a-z0-9-]*[a-z0-9]$/.test(id)) return 'Only lowercase letters, numbers, and hyphens allowed (no leading/trailing hyphens)';
     if (/--/.test(id)) return 'No consecutive hyphens';
     return null;
   }
 
-  create(customId, ownerUserId) {
+  /**
+   * Free a slug held by a room that is not live, so it can be reclaimed.
+   * Returns false if the room is still live.
+   */
+  _reclaimSlug(slug) {
+    const existing = this.rooms.get(slug);
+    if (!existing) return true;
+    if (existing.broadcaster && existing.broadcaster.readyState === 1) return false;
+    if (existing.silenceInterval) clearInterval(existing.silenceInterval);
+    if (existing.silenceTimeout) clearTimeout(existing.silenceTimeout);
+    for (const writer of existing.relayListeners) {
+      try { writer.end(); } catch { /* ignore */ }
+    }
+    existing.relayListeners.clear();
+    try { this.storage?.closeRoomListenerSessions(slug, Date.now()); } catch { /* non-fatal */ }
+    this.rooms.delete(slug);
+    return true;
+  }
+
+  /**
+   * Create a room.
+   * @param {string} [customId] slug the broadcaster explicitly asked for (recorded in slug history)
+   * @param {string} [ownerUserId]
+   * @param {object} [options]
+   * @param {string} [options.defaultId] slug to use when no customId was given (a username
+   *   slug). Never recorded in slug history, and silently falls back to a random id when it
+   *   is invalid or currently live.
+   */
+  create(customId, ownerUserId, options = {}) {
     // If a custom ID is provided, validate and check uniqueness
     if (customId) {
       const error = RoomManager.validateCustomId(customId);
       if (error) return { ok: false, error, code: 'INVALID_ROOM_ID' };
-      if (this.rooms.has(customId)) {
-        const existing = this.rooms.get(customId);
-        const isLive = existing.broadcaster && existing.broadcaster.readyState === 1;
-        if (isLive) {
-          return { ok: false, error: 'That room is currently live, try again when it ends', code: 'ROOM_ID_TAKEN' };
-        }
-        // Room exists but isn't live, clean up any lingering resources and reclaim
-        if (existing.silenceInterval) clearInterval(existing.silenceInterval);
-        if (existing.silenceTimeout) clearTimeout(existing.silenceTimeout);
-        for (const writer of existing.relayListeners) {
-          try { writer.end(); } catch { /* ignore */ }
-        }
-        existing.relayListeners.clear();
-        try { this.storage?.closeRoomListenerSessions(customId, Date.now()); } catch { /* non-fatal */ }
-        this.rooms.delete(customId);
+      if (!this._reclaimSlug(customId)) {
+        return { ok: false, error: 'That room is currently live, try again when it ends', code: 'ROOM_ID_TAKEN' };
       }
     }
 
-    const roomId = customId || crypto.randomBytes(4).toString('hex').slice(0, 7);
+    let defaultId = null;
+    if (!customId && options.defaultId) {
+      const error = RoomManager.validateCustomId(options.defaultId);
+      if (error) {
+        this.logger.warn({ defaultId: options.defaultId, error }, 'Username slug unusable, using a random room id');
+      } else if (!this._reclaimSlug(options.defaultId)) {
+        this.logger.warn({ defaultId: options.defaultId }, 'Username slug is live elsewhere, using a random room id');
+      } else {
+        defaultId = options.defaultId;
+      }
+    }
+
+    const roomId = customId || defaultId || crypto.randomBytes(4).toString('hex').slice(0, 7);
     const room = this._newRoomState(roomId);
     room.ownerUserId = ownerUserId || null;
     this.rooms.set(roomId, room);

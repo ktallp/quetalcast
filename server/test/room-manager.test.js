@@ -10,7 +10,7 @@ process.env.DATA_DIR = tmpDir;
 process.env.LOG_DIR = path.join(tmpDir, 'logs');
 
 const { Storage } = await import('../storage.js');
-const { RoomManager } = await import('../room-manager.js');
+const { RoomManager, usernameToSlug } = await import('../room-manager.js');
 
 const fakeLogger = { info() {}, warn() {}, error() {}, debug() {} };
 
@@ -47,6 +47,7 @@ after(() => {
 
 describe('validateCustomId', () => {
   it('accepts valid slugs', () => {
+    assert.equal(RoomManager.validateCustomId('dj'), null);
     assert.equal(RoomManager.validateCustomId('abc'), null);
     assert.equal(RoomManager.validateCustomId('my-room'), null);
     assert.equal(RoomManager.validateCustomId('show-42'), null);
@@ -59,8 +60,9 @@ describe('validateCustomId', () => {
   });
 
   it('rejects too short and too long slugs', () => {
-    assert.match(RoomManager.validateCustomId('ab'), /3-40 characters/);
-    assert.match(RoomManager.validateCustomId('a'.repeat(41)), /3-40 characters/);
+    assert.match(RoomManager.validateCustomId('a'), /2-40 characters/);
+    assert.match(RoomManager.validateCustomId(''), /2-40 characters/);
+    assert.match(RoomManager.validateCustomId('a'.repeat(41)), /2-40 characters/);
   });
 
   it('rejects bad characters and leading/trailing hyphens', () => {
@@ -74,6 +76,34 @@ describe('validateCustomId', () => {
   it('rejects consecutive hyphens', () => {
     assert.match(RoomManager.validateCustomId('a--b'), /consecutive hyphens/i);
     assert.match(RoomManager.validateCustomId('one--two-three'), /consecutive hyphens/i);
+  });
+});
+
+describe('usernameToSlug', () => {
+  it('lowercases and maps dots and underscores to hyphens', () => {
+    assert.equal(usernameToSlug('DJ_Nova'), 'dj-nova');
+    assert.equal(usernameToSlug('tom.larkin'), 'tom-larkin');
+    assert.equal(usernameToSlug('MiXeD.Case_Name'), 'mixed-case-name');
+  });
+
+  it('collapses and trims hyphen runs', () => {
+    assert.equal(usernameToSlug('a._b'), 'a-b');
+    assert.equal(usernameToSlug('__dj__'), 'dj');
+    assert.equal(usernameToSlug('-edge-'), 'edge');
+    assert.equal(usernameToSlug('a---b'), 'a-b');
+  });
+
+  it('leaves already-valid slugs alone', () => {
+    assert.equal(usernameToSlug('nightowl'), 'nightowl');
+    assert.equal(usernameToSlug('show-42'), 'show-42');
+  });
+
+  it('can produce output that is not a valid room id', () => {
+    assert.equal(usernameToSlug(''), '');
+    assert.equal(usernameToSlug('___'), '');
+    assert.equal(usernameToSlug(null), '');
+    assert.equal(usernameToSlug('x'), 'x');
+    assert.ok(RoomManager.validateCustomId(usernameToSlug('x')));
   });
 });
 
@@ -117,6 +147,59 @@ describe('room creation', () => {
     const reclaimed = rm.create('busy-room');
     assert.equal(reclaimed.ok, true);
     assert.equal(reclaimed.roomId, 'busy-room');
+  });
+});
+
+describe('default room id (username slug)', () => {
+  it('uses the default id without recording slug history', () => {
+    const result = rm.create(undefined, 'user-1', { defaultId: 'dj-nova' });
+    assert.equal(result.ok, true);
+    assert.equal(result.roomId, 'dj-nova');
+    assert.equal(rm.getSlugHistory().some((e) => e.slug === 'dj-nova'), false);
+    assert.equal(storage.listSlugs().some((s) => s.slug === 'dj-nova'), false);
+  });
+
+  it('still records slug history for an explicit custom id', () => {
+    const result = rm.create('hand-typed', 'user-1', { defaultId: 'dj-nova' });
+    assert.equal(result.ok, true);
+    assert.equal(result.roomId, 'hand-typed');
+    assert.ok(rm.getSlugHistory().some((e) => e.slug === 'hand-typed'));
+  });
+
+  it('accepts a two-character default id', () => {
+    const result = rm.create(undefined, 'user-2', { defaultId: 'dj' });
+    assert.equal(result.ok, true);
+    assert.equal(result.roomId, 'dj');
+  });
+
+  it('falls back to a random id when the default id is invalid', () => {
+    const result = rm.create(undefined, 'user-3', { defaultId: 'x' });
+    assert.equal(result.ok, true);
+    assert.equal(result.roomId.length, 7);
+    assert.notEqual(result.roomId, 'x');
+  });
+
+  it('falls back to a random id when the default id is live elsewhere', () => {
+    rm.create(undefined, 'user-4', { defaultId: 'popular-dj' });
+    const ws = fakeWs();
+    assert.equal(rm.join('popular-dj', 'broadcaster', ws).ok, true);
+
+    const second = rm.create(undefined, 'user-5', { defaultId: 'popular-dj' });
+    assert.equal(second.ok, true);
+    assert.equal(second.roomId.length, 7);
+    assert.notEqual(second.roomId, 'popular-dj');
+  });
+
+  it('reclaims the broadcaster own ended room at the default id', () => {
+    rm.create(undefined, 'user-6', { defaultId: 'returning-dj' });
+    rm.join('returning-dj', 'broadcaster', fakeWs());
+    rm.addChat('returning-dj', { name: 'dj', text: 'set 1' });
+    rm.leave('returning-dj', 'broadcaster');
+
+    const again = rm.create(undefined, 'user-6', { defaultId: 'returning-dj' });
+    assert.equal(again.ok, true);
+    assert.equal(again.roomId, 'returning-dj');
+    assert.equal(rm.join('returning-dj', 'broadcaster', fakeWs()).ok, true);
   });
 });
 

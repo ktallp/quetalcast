@@ -451,7 +451,7 @@ const Broadcaster = () => {
         localStorage.removeItem('webrtc-bridge-auth');
         setTimeout(() => navigate('/login'), 500);
       }
-      if (msg.type === 'error' && (msg.code === 'INVALID_ROOM_ID' || msg.code === 'ROOM_ID_TAKEN')) {
+      if (msg.type === 'error' && (msg.code === 'INVALID_ROOM_ID' || msg.code === 'ROOM_ID_TAKEN' || msg.code === 'SLUG_RESERVED')) {
         const errMsg = typeof msg.message === 'string' ? msg.message : 'Invalid room ID';
         toast.error(errMsg);
         addLog(errMsg, 'error');

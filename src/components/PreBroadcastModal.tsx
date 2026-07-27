@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { Radio, Clock, X, Link, Type, FileText, Ear } from 'lucide-react';
 import {
   Dialog,
@@ -7,9 +7,19 @@ import {
   DialogTitle,
   DialogDescription,
 } from '@/components/ui/dialog';
+import { getSession } from '@/lib/auth';
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
 const CUSTOM_URL_PATTERN = /^[a-z0-9][a-z0-9-]*[a-z0-9]$/;
+
+/** Mirror of usernameToSlug in server/room-manager.js */
+function usernameToSlug(username: string): string {
+  return username
+    .toLowerCase()
+    .replace(/[._]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
 
 interface SavedSlug {
   slug: string;
@@ -59,7 +69,7 @@ async function deleteServerSlug(slug: string): Promise<void> {
 
 function validateCustomUrl(value: string): string | null {
   if (!value) return null;
-  if (value.length < 3) return 'At least 3 characters';
+  if (value.length < 2) return 'At least 2 characters';
   if (value.length > 40) return '40 characters max';
   if (/--/.test(value)) return 'No consecutive hyphens';
   if (!CUSTOM_URL_PATTERN.test(value)) return 'Lowercase letters, numbers, hyphens only';
@@ -79,6 +89,12 @@ export function PreBroadcastModal({ open, onOpenChange, onStart, onSkip, showAut
   const [pendingDeleteSlug, setPendingDeleteSlug] = useState<string | null>(null);
   const [autoIdentify, setAutoIdentify] = useState(false);
   const urlInputRef = useRef<HTMLInputElement>(null);
+
+  // Blank input means the server uses this, the broadcaster's username slug
+  const defaultSlug = useMemo(() => {
+    const slug = usernameToSlug(getSession()?.username ?? '');
+    return validateCustomUrl(slug) ? '' : slug;
+  }, []);
 
   const refreshSlugs = useCallback(async () => {
     const slugs = await fetchSavedSlugs();
@@ -183,7 +199,7 @@ export function PreBroadcastModal({ open, onOpenChange, onStart, onSkip, showAut
                   onBlur={() => {
                     setTimeout(() => setShowUrlSuggestions(false), 200);
                   }}
-                  placeholder="auto-generated"
+                  placeholder={defaultSlug || 'auto-generated'}
                   maxLength={40}
                   spellCheck={false}
                   autoComplete="off"
@@ -276,9 +292,15 @@ export function PreBroadcastModal({ open, onOpenChange, onStart, onSkip, showAut
               </p>
             )}
             {!customUrl && (
-              <p className="text-[10px] text-muted-foreground/60">
-                Leave blank for an auto-generated ID
-              </p>
+              defaultSlug ? (
+                <p className="text-[10px] text-muted-foreground/60 truncate">
+                  Defaults to your username: <span className="font-mono">{window.location.origin}/receive/{defaultSlug}</span>. Enter a custom URL to override.
+                </p>
+              ) : (
+                <p className="text-[10px] text-muted-foreground/60">
+                  Leave blank for an auto-generated ID
+                </p>
+              )
             )}
           </div>
 
