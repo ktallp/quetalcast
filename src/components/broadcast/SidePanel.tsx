@@ -18,8 +18,8 @@ interface SidePanelProps {
  * live here so the page stays one screen tall on desktop.
  *
  * Every tab stays mounted and inactive ones are hidden, rather than only the
- * active tab being rendered. Panels here own live audio — soundboard pads and
- * the bank C playlist — and unmounting them mid-show stopped playback and threw
+ * active tab being rendered. Panels here own live audio (soundboard pads and
+ * the bank C playlist) and unmounting them mid-show stopped playback and threw
  * away loaded audio the moment you glanced at the Log.
  */
 export function SidePanel({ tabs, active, onTabChange }: SidePanelProps) {

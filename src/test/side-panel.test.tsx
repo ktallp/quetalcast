@@ -5,7 +5,7 @@ import { Music, FileText } from 'lucide-react';
 import { SidePanel } from '@/components/broadcast/SidePanel';
 
 /**
- * The Sounds tab owns live audio — soundboard pads and the bank C playlist.
+ * The Sounds tab owns live audio: soundboard pads and the bank C playlist.
  * If SidePanel drops inactive tabs, glancing at the Log kills playback and
  * discards everything loaded, so these tests pin that tabs stay mounted.
  */

@@ -46,7 +46,7 @@ function formatTime(seconds: number | null): string {
 /**
  * Bank C: a continuous-play list rather than one-shot pads.
  *
- * Tracks live only for the current session — files are held as object URLs and
+ * Tracks live only for the current session: files are held as object URLs and
  * never persisted, so nothing survives a reload. That is deliberate: pads in
  * banks A and B are persisted to localStorage as base64, which a music-length
  * playlist would blow past the ~5MB quota immediately.
@@ -72,7 +72,7 @@ export function SoundPlaylist({
   const [volume, setVolume] = useState(100);
   const [elapsed, setElapsed] = useState(0);
   const [confirmClear, setConfirmClear] = useState(false);
-  /** Tracks still sounding on a non-current deck — a fade-out being played over */
+  /** Tracks still sounding on a non-current deck, a fade-out being played over */
   const [tailIds, setTailIds] = useState<string[]>([]);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -538,7 +538,7 @@ export function SoundPlaylist({
                 <button
                   onClick={() => segueTrack(track.id)}
                   aria-label={`Start ${track.title} over the current track`}
-                  title="Segue — start over the current track's fade-out"
+                  title="Segue: start over the current track's fade-out"
                   className="p-0.5 rounded text-muted-foreground/40 hover:text-primary transition-colors shrink-0"
                 >
                   <Layers className="h-3 w-3" aria-hidden />
@@ -617,7 +617,7 @@ export function SoundPlaylist({
 
       <p className="mt-2 text-[10px] text-muted-foreground/50">
         Plays continuously, advancing to the next track. Play cuts to a track; segue
-        starts it over the current track's fade-out. Tracks are session-only — they clear
+        starts it over the current track's fade-out. Tracks are session-only; they clear
         when you reload.
       </p>
 

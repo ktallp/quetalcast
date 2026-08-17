@@ -4,7 +4,7 @@ import { SoundPlaylist } from '@/components/SoundPlaylist';
 
 /**
  * Bank C playlist behaviour. The component drives two <audio> decks, so these
- * tests capture the elements it constructs and drive them directly — jsdom
+ * tests capture the elements it constructs and drive them directly, since jsdom
  * implements no real media playback.
  */
 
@@ -268,7 +268,7 @@ describe('SoundPlaylist', () => {
     expect(onTrackPlayback).toHaveBeenLastCalledWith('Three', true);
   });
 
-  it('persists nothing — the playlist is session-only', () => {
+  it('persists nothing: the playlist is session-only', () => {
     const { container } = renderPlaylist();
     addTracks(container, ['One.mp3', 'Two.mp3']);
     fireEvent.click(screen.getByLabelText('Play One'));
