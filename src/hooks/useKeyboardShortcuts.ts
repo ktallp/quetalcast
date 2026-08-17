@@ -117,7 +117,7 @@ export const SHORTCUT_MAP = [
   { key: 'R', description: 'Toggle recording' },
   { key: 'L', description: 'Toggle listen' },
   { key: 'C', description: 'Toggle cue mode' },
-  { key: '1–9, 0', description: 'Trigger sound pads 1–10' },
+  { key: '1–9, 0', description: 'Trigger sound pads 1–10 (bank C: playlist tracks)' },
   { key: 'Q', description: 'Hold for Radio Voice FX' },
   { key: 'W', description: 'Hold for Big Room FX' },
   { key: 'E', description: 'Hold for Slapback FX' },

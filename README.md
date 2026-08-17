@@ -5,7 +5,7 @@ Real-time audio broadcasting application built with WebRTC, React, and Node.js. 
 ## Features
 
 - **High-fidelity audio** — Opus codec at up to 510 kbps stereo with adaptive quality (High / Auto / Low)
-- **Sounds**: three banks (A/B/C) of ten pads with MP3 loading, drag-to-reorder, playback progress rings, loop toggle, per-pad volume (up to 300%), keycap hints, and broadcast mixing
+- **Sounds**: banks A and B are ten one-shot pads each with MP3 loading, drag-to-reorder, playback progress rings, loop toggle, per-pad volume (up to 300%), keycap hints, and broadcast mixing. Bank C is a continuous playlist: add several files at once, auto-advance on track end, drag to reorder, transport controls, repeat, per-track run times, and its own fader. Play cuts to a track; Segue starts it over the current track's fade-out on a second deck. Playlist tracks are session-only and never persisted
 - **Mic effects**: a Voice chain (Enhance with noise gate, tone/EQ, compressor with live gain-reduction meter, de-esser) with hold-to-bypass comparison and an optional ten-second sound check; momentary FX pads (Radio Voice, Big Room, Slapback, Pitch Drop) with hold-to-apply, tap-to-latch, and ring-out tails; manual Voice Shift, Delay, and Reverb effects with per-effect settings
 - **Auto-duck**: music channels (Sound Pads, System Audio) can automatically dip about 9 dB under the mic while you speak, with a gentle release
 - **Audio presets** — Save and recall effect profiles (effects only, not mixer). In effects panel. 3 built-in presets (Podcast Voice, DJ Mode, Lo-Fi) plus unlimited custom presets stored in localStorage
@@ -26,7 +26,7 @@ Real-time audio broadcasting application built with WebRTC, React, and Node.js. 
 - **Show archive** — Optional server-side recording: the relay MP3 is teed to the data volume and each show gets a public page at `/show/<room>` with the recording, click-to-jump track list, and chat replay synced to playback; retention capped from the Archives tab
 - **Hardware look** — Optional console skin (off by default): analog VU needles with real ballistics, cart-style sound pads, backlit latching transport switches, and an LED elapsed-time display
 - **Local recording** — Record your broadcast as a 320 kbps stereo MP3, auto-downloaded when you stop. Start recording before going on air to capture from the moment you hit record. If you end the broadcast while recording, recording continues until you stop it or click Download ZIP in the modal. Recording also continues when you start a new broadcast — use the Record button or Download ZIP to stop and save. Uses AudioWorklet + Web Worker for energy-efficient encoding
-- **Keyboard shortcuts**: Space (mute), R (record), L (listen), C (cue), 1–0 (sound pads, active bank), Q/W/E/T (hold for momentary FX), ? (help). Active while on air, disabled when typing in inputs
+- **Keyboard shortcuts**: Space (mute), R (record), L (listen), C (cue), 1–0 (sound pads in banks A/B, playlist tracks in bank C), Q/W/E/T (hold for momentary FX), ? (help). Active while on air, disabled when typing in inputs
 - **User accounts**: owners create DJ and Owner accounts from the admin Users tab with 24-hour invite links (`/join/<token>`); users set their own passwords, sessions are revocable server-side, and disabling a user signs them out immediately
 - **Admin dashboard**: live stats (rooms, listeners now, peak today, uptime), per-room listener counts, peaks, durations, and actions (open, copy link, end room), plus per-room listener analytics sampled every minute
 - **Persistence**: rooms, track lists, chat history, saved URLs, users, and sessions live in SQLite on a mounted volume, so post-broadcast history and recovery survive server restarts and deploys
@@ -187,7 +187,8 @@ fly deploy
 │   │   ├── IntegrationsSheet.tsx # External streaming platform config
 │   │   ├── NowPlayingInput.tsx # Deezer autocomplete for now-playing metadata
 │   │   ├── TrackList.tsx       # Chronological track history display
-│   │   ├── SoundBoard.tsx      # 5x2 sound pad grid
+│   │   ├── SoundBoard.tsx      # Sound pad banks A/B (5x2 grid) and the bank switcher
+│   │   ├── SoundPlaylist.tsx   # Bank C continuous playlist with two-deck segue
 │   │   ├── LevelMeter.tsx      # Stereo VU meter with dBFS scale
 │   │   ├── StatusBar.tsx       # Room ID, timer, connection status
 │   │   ├── HealthPanel.tsx     # RTT, packet loss, jitter display

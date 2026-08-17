@@ -154,9 +154,9 @@ export default function DocsBroadcaster() {
       <section>
         <h2 className="text-lg font-semibold text-foreground mb-3">Sounds</h2>
         <p>
-          The <strong>Sounds</strong> tab holds your pads: three banks (<strong>A</strong>,{' '}
-          <strong>B</strong>, <strong>C</strong>) of 10 pads each. Tap an empty pad to load an
-          audio file. Once loaded:
+          The <strong>Sounds</strong> tab holds three banks. <strong>A</strong> and{' '}
+          <strong>B</strong> are 10 one-shot pads each; <strong>C</strong> is a continuous
+          playlist (see below). Tap an empty pad to load an audio file. Once loaded:
         </p>
         <ul className="list-disc list-inside mt-2 space-y-1 pl-1">
           <li>Tap to play or stop. A progress ring shows how far through the clip you are.</li>
@@ -170,6 +170,41 @@ export default function DocsBroadcaster() {
           Pads are mixed into your broadcast through the Sound Pads channel. Use{' '}
           <strong>CUE</strong> to preview clips privately before playing them on air. Your pads,
           banks, and settings are saved locally and restored on reload.
+        </p>
+
+        <h3 className="text-base font-semibold text-foreground mt-6 mb-2">Bank C: playlist</h3>
+        <p>
+          Bank <strong>C</strong> plays a list straight through instead of firing pads. Use{' '}
+          <strong>Add tracks</strong> to load several files at once; each row shows its run time
+          once the file is read, and the footer totals the list.
+        </p>
+        <ul className="list-disc list-inside mt-2 space-y-1 pl-1">
+          <li>
+            Transport: previous, play/pause, stop, next, and <strong>repeat</strong> (wrap to the
+            start when the last track ends). Without repeat the playlist stops after the last
+            track.
+          </li>
+          <li>
+            <strong>Play</strong> on a row cuts to that track, stopping anything already sounding.
+          </li>
+          <li>
+            <strong>Segue</strong> (layers icon) starts a track on a second deck over the top of
+            the current one, so the outgoing track plays out its tail. It stays in the list marked{' '}
+            <em>tail</em> until it finishes. Only the track holding the list position advances the
+            playlist; a tail finishing underneath never skips a track.
+          </li>
+          <li>Keys <strong>1 to 9 and 0</strong> jump to tracks 1 to 10 while bank C is showing.</li>
+          <li>Drag rows to reorder. X removes a track; Clear empties the list after confirming.</li>
+          <li>
+            <strong>Playlist Volume</strong> is a separate fader (up to 300%) into the Sound Pads
+            channel, so the mixer strip, CUE, ducking, and monitor toggle all apply.
+          </li>
+        </ul>
+        <p className="mt-2">
+          Playlist tracks are <strong>session-only</strong>: they are held in memory and are not
+          saved to localStorage, so a reload starts bank C empty. Banks A and B keep persisting
+          as before. Switching to bank A or B, or to another side panel tab, does not interrupt a
+          playing set, so you can fire a jingle over it and come back.
         </p>
       </section>
 
@@ -353,7 +388,7 @@ export default function DocsBroadcaster() {
               </tr>
               <tr className="border-b border-border/40">
                 <td className="py-2 pr-4"><code>1</code> to <code>9</code>, <code>0</code></td>
-                <td className="py-2">Trigger sound pads 1 to 10 (active bank)</td>
+                <td className="py-2">Trigger sound pads 1 to 10 in the active bank (bank C: jump to playlist tracks 1 to 10)</td>
               </tr>
               <tr className="border-b border-border/40">
                 <td className="py-2 pr-4"><code>Q</code> / <code>W</code> / <code>E</code> / <code>T</code></td>
