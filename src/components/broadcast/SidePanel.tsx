@@ -16,6 +16,11 @@ interface SidePanelProps {
 /**
  * Tabbed side panel for the console: Sounds, Effects, Tracks, and Log
  * live here so the page stays one screen tall on desktop.
+ *
+ * Every tab stays mounted and inactive ones are hidden, rather than only the
+ * active tab being rendered. Panels here own live audio — soundboard pads and
+ * the bank C playlist — and unmounting them mid-show stopped playback and threw
+ * away loaded audio the moment you glanced at the Log.
  */
 export function SidePanel({ tabs, active, onTabChange }: SidePanelProps) {
   const activeTab = tabs.find((t) => t.id === active) ?? tabs[0];
@@ -45,8 +50,18 @@ export function SidePanel({ tabs, active, onTabChange }: SidePanelProps) {
           );
         })}
       </div>
-      <div id={`side-panel-${activeTab.id}`} role="tabpanel" className="p-4 overflow-y-auto min-h-0">
-        {activeTab.content}
+      <div className="p-4 overflow-y-auto min-h-0">
+        {tabs.map((tab) => (
+          <div
+            key={tab.id}
+            id={`side-panel-${tab.id}`}
+            role="tabpanel"
+            aria-label={tab.label}
+            hidden={tab.id !== activeTab.id}
+          >
+            {tab.content}
+          </div>
+        ))}
       </div>
     </div>
   );
