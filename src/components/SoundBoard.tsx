@@ -9,6 +9,7 @@ import {
 } from '@/components/ui/dialog';
 import { Slider } from '@/components/ui/slider';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
+import { SoundPlaylist } from '@/components/SoundPlaylist';
 
 interface PadState {
   file: File | null;
@@ -37,6 +38,8 @@ const EMPTY_PAD: PadState = {
 const PAD_COUNT = 10;
 const BANK_COUNT = 3;
 const BANK_LABELS = ['A', 'B', 'C'];
+/** Bank C is a continuous-play playlist rather than a grid of one-shot pads */
+const PLAYLIST_BANK = 2;
 const SOUNDBOARD_STORAGE_KEY = 'quetalcast:soundboard:v1';
 const PAD_KEYCAPS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'];
 
@@ -89,6 +92,8 @@ export function SoundBoard({ connectElement, triggerRef, onPadPlayback, hardware
   const dragIndexRef = useRef<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   const [progress, setProgress] = useState<Record<string, number>>({});
+  const playlistTriggerRef = useRef<((index: number) => void) | null>(null);
+  const [playlistCount, setPlaylistCount] = useState(0);
 
   // Edit modal state
   const [editIndex, setEditIndex] = useState<number | null>(null);
@@ -152,6 +157,9 @@ export function SoundBoard({ connectElement, triggerRef, onPadPlayback, hardware
 
         const nextBanks = Array.from({ length: BANK_COUNT }, (_, bank) =>
           Array.from({ length: PAD_COUNT }, (_, index) => {
+            // Bank C is a session-only playlist; skip any pads a previous
+            // version persisted there rather than hydrating dead audio.
+            if (bank === PLAYLIST_BANK) return { ...EMPTY_PAD };
             const stored = storedBanks[bank]?.[index];
             return stored?.dataUrl ? hydratePad(stored, bank, index) : { ...EMPTY_PAD };
           }),
@@ -178,13 +186,17 @@ export function SoundBoard({ connectElement, triggerRef, onPadPlayback, hardware
     const payload: StoredBoard = {
       version: 2,
       activeBank,
-      banks: banks.map((bank) =>
-        bank.map((p) => ({
-          title: p.title,
-          volume: p.volume,
-          loop: p.loop,
-          dataUrl: p.dataUrl,
-        })),
+      // Bank C holds session-only playlist tracks, which are far too large for
+      // localStorage; persist it as empty so a reload starts it clean.
+      banks: banks.map((bank, bi) =>
+        bi === PLAYLIST_BANK
+          ? []
+          : bank.map((p) => ({
+              title: p.title,
+              volume: p.volume,
+              loop: p.loop,
+              dataUrl: p.dataUrl,
+            })),
       ),
     };
     try {
@@ -346,11 +358,14 @@ export function SoundBoard({ connectElement, triggerRef, onPadPlayback, hardware
     );
   };
 
-  // Expose triggerPad for keyboard shortcuts (active bank)
+  // Expose triggerPad for keyboard shortcuts, routed to whichever bank is
+  // showing: pads in A and B, playlist tracks in C.
   useEffect(() => {
     if (triggerRef) {
       triggerRef.current = (index: number) => {
-        if (index >= 0 && index < PAD_COUNT) {
+        if (activeBank === PLAYLIST_BANK) {
+          playlistTriggerRef.current?.(index);
+        } else if (index >= 0 && index < PAD_COUNT) {
           handlePlayStop(index);
         }
       };
@@ -358,7 +373,7 @@ export function SoundBoard({ connectElement, triggerRef, onPadPlayback, hardware
     return () => {
       if (triggerRef) triggerRef.current = null;
     };
-  }, [handlePlayStop, triggerRef]);
+  }, [handlePlayStop, triggerRef, activeBank]);
 
   const editPad = editIndex !== null ? pads[editIndex] : null;
   const removePad = removeIndex !== null ? pads[removeIndex] : null;
@@ -369,10 +384,14 @@ export function SoundBoard({ connectElement, triggerRef, onPadPlayback, hardware
       <div className="flex items-center justify-between mb-2">
         <span className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground">
           Bank {BANK_LABELS[activeBank]}
+          {activeBank === PLAYLIST_BANK && (
+            <span className="ml-1 text-muted-foreground/60">· Playlist</span>
+          )}
         </span>
         <div className="flex rounded-md border border-border overflow-hidden" role="group" aria-label="Sound pad bank">
           {BANK_LABELS.map((label, i) => {
-            const hasContent = banks[i].some((p) => p.audioEl);
+            const hasContent =
+              i === PLAYLIST_BANK ? playlistCount > 0 : banks[i].some((p) => p.audioEl);
             return (
               <button
                 key={label}
@@ -394,7 +413,10 @@ export function SoundBoard({ connectElement, triggerRef, onPadPlayback, hardware
         </div>
       </div>
 
-      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+      {/* Pad banks (A and B). Kept mounted but hidden while bank C shows, so
+          switching banks never interrupts a pad that is mid-playback. */}
+      <div className={activeBank === PLAYLIST_BANK ? 'hidden' : undefined}>
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
         {pads.map((pad, i) => {
           const frac = progress[`${activeBank}-${i}`];
           return (
@@ -542,11 +564,24 @@ export function SoundBoard({ connectElement, triggerRef, onPadPlayback, hardware
             </div>
           );
         })}
+        </div>
+
+        <p className="mt-2 text-[10px] text-muted-foreground/50 hidden sm:block">
+          Drag pads to reorder. Keys 1-0 trigger the active bank.
+        </p>
       </div>
 
-      <p className="mt-2 text-[10px] text-muted-foreground/50 hidden sm:block">
-        Drag pads to reorder. Keys 1-0 trigger the active bank.
-      </p>
+      {/* Bank C: continuous playlist. Also kept mounted so a set keeps playing
+          while you switch to A or B to fire a jingle over it. */}
+      <div className={activeBank === PLAYLIST_BANK ? undefined : 'hidden'}>
+        <SoundPlaylist
+          connectElement={connectElement}
+          triggerRef={playlistTriggerRef}
+          onTrackPlayback={onPadPlayback}
+          onTrackCountChange={setPlaylistCount}
+          hardware={hardware}
+        />
+      </div>
 
       {/* Hidden file input */}
       <input
