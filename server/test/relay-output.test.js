@@ -104,3 +104,30 @@ test('no fill before the first real frame', () => {
   assert.equal(emitted.length, 0);
   assert.equal(out.health().streaming, false);
 });
+
+test('late audio arriving after a filled stall is dropped rather than pushing players behind live', () => {
+  const { out, emitted, advance } = makeOutput();
+  out.pushEncoded(frame(0));
+  for (let t = 0; t < 4000; t += 100) { advance(100); out.tick(); }
+  const fillBefore = emitted.filter((e) => e.isFill).length;
+  assert.ok(fillBefore > 0);
+  // The stalled 4 s of audio now arrives in one burst (~153 frames)
+  const burst = Buffer.concat(Array.from({ length: 153 }, () => frame(0)));
+  const realBefore = emitted.filter((e) => !e.isFill).reduce((n, e) => n + e.bytes, 0);
+  out.pushEncoded(burst);
+  const realAfter = emitted.filter((e) => !e.isFill).reduce((n, e) => n + e.bytes, 0);
+  const kept = (realAfter - realBefore) / 417;
+  // Only ~1 s (MAX_AHEAD_MS) of the burst may go out
+  assert.ok(kept <= 39 && kept >= 36, `kept ${kept} frames`);
+  assert.ok(out.health().droppedMs > 2900, `dropped ${out.health().droppedMs} ms`);
+});
+
+test('normal quarter-second bursts never trip the late-audio guard', () => {
+  const { out, advance } = makeOutput();
+  for (let i = 0; i < 40; i++) {
+    out.pushEncoded(Buffer.concat(Array.from({ length: 10 }, () => frame(0)))); // ~261 ms of audio
+    advance(250); out.tick(); // wait: 261 ms every 250 ms is slightly fast
+    advance(11);
+  }
+  assert.equal(out.health().droppedMs, 0);
+});

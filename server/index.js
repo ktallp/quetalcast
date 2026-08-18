@@ -604,6 +604,9 @@ function startRoomTranscoder(room, roomId) {
   });
 
   proc.stdout.on('data', (mp3Data) => {
+    // A superseded transcoder may still flush a little after a resync; only
+    // the current one feeds the stream
+    if (room.ffmpegProcess !== proc) return;
     if (room.relayOutput) room.relayOutput.pushEncoded(mp3Data);
     else writeRelayData(room, mp3Data);
   });
@@ -724,7 +727,7 @@ function sendRelayHealth(room, roomId) {
   if (state !== room.relayLastHealthState) {
     room.relayLastHealthState = state;
     if (state === 'stalled') logger.warn({ roomId: roomId.slice(0, 8), ingestAgeMs: h.ingestAgeMs }, 'Relay input stalled; filling with silence');
-    else if (state === 'feeding' && h.lastStallMs) logger.info({ roomId: roomId.slice(0, 8), stallMs: h.lastStallMs }, 'Relay input resumed');
+    else if (state === 'feeding' && h.lastStallMs) logger.info({ roomId: roomId.slice(0, 8), stallMs: h.lastStallMs, droppedMs: h.droppedMs }, 'Relay input resumed');
   }
   const bcaster = rooms.getBroadcaster(roomId);
   if (bcaster && bcaster.readyState === 1) {
@@ -736,6 +739,7 @@ function sendRelayHealth(room, roomId) {
         stalls: h.stalls,
         lastStallMs: h.lastStallMs,
         totalFillMs: h.totalFillMs,
+        droppedMs: h.droppedMs,
         listeners: room.relayListeners.size,
       }));
     } catch { /* socket closing */ }
@@ -1627,6 +1631,13 @@ wss.on('connection', (ws, req) => {
           // begins a WebM stream (EBML header), so a stray mid-stream chunk
           // from a recorder that was being replaced cannot wedge FFmpeg on a
           // failed probe. Chunks arriving with no transcoder are dropped.
+          if (isWebmHeader(data) && room.ffmpegProcess) {
+            // The console started a fresh recorder (backlog catch-up, bitrate
+            // change, mic reconnect): a new WebM stream begins here, so give
+            // it a fresh transcoder rather than feeding a header mid-stream.
+            logger.info({ roomId: clientRoom.slice(0, 8) }, 'Relay resync: new WebM header, restarting transcoder');
+            stopRoomTranscoder(room);
+          }
           if (!room.ffmpegProcess) {
             if (isWebmHeader(data)) {
               startRoomTranscoder(room, clientRoom);

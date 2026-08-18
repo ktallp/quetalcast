@@ -159,8 +159,8 @@ const Broadcaster = () => {
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [listenerCount, setListenerCount] = useState(0);
   const [relayHealth, setRelayHealth] = useState<RelayHealth | null>(null);
-  const [serverRtt, setServerRtt] = useState<number | null>(null);
   const relayStateRef = useRef<RelayHealth['state'] | null>(null);
+  const relayDroppedRef = useRef(0);
   const [nowPlaying, setNowPlaying] = useState('');
   const [, setNowPlayingCover] = useState<string | undefined>();
   const nowPlayingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -538,15 +538,13 @@ const Broadcaster = () => {
       if (msg.type === 'track-list' && Array.isArray(msg.tracks)) {
         setTrackList(msg.tracks as Track[]);
       }
-      if (msg.type === 'pong' && typeof msg.t === 'number') {
-        setServerRtt(Math.max(0, Date.now() - msg.t));
-      }
       if (msg.type === 'relay-health' && typeof msg.state === 'string') {
         const health: RelayHealth = {
           state: msg.state as RelayHealth['state'],
           gapMs: typeof msg.gapMs === 'number' ? msg.gapMs : 0,
           stalls: typeof msg.stalls === 'number' ? msg.stalls : 0,
           lastStallMs: typeof msg.lastStallMs === 'number' ? msg.lastStallMs : 0,
+          droppedMs: typeof msg.droppedMs === 'number' ? msg.droppedMs : 0,
           listeners: typeof msg.listeners === 'number' ? msg.listeners : 0,
         };
         setRelayHealth(health);
@@ -556,26 +554,30 @@ const Broadcaster = () => {
         relayStateRef.current = health.state;
         if (prev && prev !== health.state) {
           if (health.state === 'stalled') addLog('Stream relay input stalled; players are hearing silence until it resumes', 'warn');
-          else if (health.state === 'feeding' && prev === 'stalled') addLog(`Stream relay resumed after ${(health.lastStallMs / 1000).toFixed(1)} s`);
+          else if (health.state === 'feeding' && prev === 'stalled') {
+            const dropped = health.droppedMs - relayDroppedRef.current;
+            relayDroppedRef.current = health.droppedMs;
+            addLog(`Stream relay resumed after ${(health.lastStallMs / 1000).toFixed(1)} s${dropped > 500 ? `; ${(dropped / 1000).toFixed(1)} s of late audio skipped to stay live` : ''}`);
+          }
         }
       }
     });
     return unsub;
   }, [signaling, addLog]);
 
-  // Round trip to the server while on air, for the Stats panel when the only
-  // listeners are on the relay (RadioDJ, VLC) and there is no WebRTC RTT
+  // Relay upload backlog events: the only sign the DJ gets that their own
+  // uplink cannot carry the relay
   useEffect(() => {
-    if (!isOnAir || !signaling.connected) {
-      setServerRtt(null);
-      return;
-    }
-    const send = signaling.send;
-    const tick = () => send({ type: 'ping', t: Date.now() });
-    tick();
-    const timer = setInterval(tick, 5000);
-    return () => clearInterval(timer);
-  }, [isOnAir, signaling.connected, signaling.send]);
+    return relayStream.onUploadEvent((e) => {
+      if (e.type === 'paused') {
+        addLog(`Relay upload cannot keep up (${(e.seconds ?? 0).toFixed(1)} s queued). Pausing relay audio until it drains; players hear silence meanwhile.`, 'warn');
+      } else if (e.type === 'resumed') {
+        addLog(`Relay upload drained after ${(e.seconds ?? 0).toFixed(1)} s; relay audio restarted`);
+      } else if (e.type === 'bitrate') {
+        addLog(`Relay bitrate set to ${e.kbps} kbps`);
+      }
+    });
+  }, [relayStream.onUploadEvent, addLog]);
 
   // Log status changes
   const prevStatus = useRef<ConnectionStatus>('idle');
@@ -841,6 +843,7 @@ const Broadcaster = () => {
       relayStartedRef.current = false;
       setRelayHealth(null);
       relayStateRef.current = null;
+      relayDroppedRef.current = 0;
     }
   }, [isOnAir, mixer.mixedStream, webrtc.roomId, relayStream]);
 
@@ -1781,7 +1784,13 @@ const Broadcaster = () => {
                         signalingState={webrtc.signalingState}
                         peerConnected={webrtc.peerConnected}
                         relay={isOnAir ? relayHealth : null}
-                        relayLink={isOnAir && relayStream.active ? { uploadKbps: relayStream.uploadKbps, rttMs: serverRtt } : null}
+                        relayLink={isOnAir && relayStream.active ? {
+                          uploadKbps: relayStream.uploadKbps,
+                          rttMs: signaling.rtt,
+                          backlogSeconds: relayStream.backlogSeconds,
+                          state: relayStream.uploadState,
+                          relayKbps: relayStream.relayKbps,
+                        } : null}
                       />
                     </div>
                   ),

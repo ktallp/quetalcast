@@ -104,7 +104,12 @@ export default function DocsIntegrations() {
           up to <strong>10 minutes</strong> so media players stay connected; when the broadcaster
           resumes, live audio replaces the silence without a reconnect. The console's Stats panel
           shows a <strong>Relay</strong> line (Feeding, or Stalled with the duration) and logs each
-          stall and resume.
+          stall and resume. If it is the console's own uplink that cannot keep up, the console
+          pauses the relay recorder rather than letting audio queue in the browser, lets the
+          socket drain, and restarts it (stepping the relay bitrate down from 128 kbps if this keeps
+          happening); the server skips audio that arrives too late so players stay close to live.
+          With no browser listeners connected, the Stats panel shows the console's real upload
+          rate, the queued backlog, and the round trip to the server.
         </p>
         <p className="mt-2">
           The relay is hardened for long-running streams: individual listener failures are isolated
