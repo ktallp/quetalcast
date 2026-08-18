@@ -4,7 +4,7 @@ Real-time audio broadcasting application built with WebRTC, React, and Node.js. 
 
 ## Features
 
-- **High-fidelity audio** — Opus codec at up to 510 kbps stereo with adaptive quality (High / Auto / Low)
+- **High-fidelity audio** — Opus codec at up to 510 kbps stereo with adaptive quality (High / Auto / Low). Auto adapts per listener: 510 → 128 → 64 → 32 kbps on packet loss, jitter, or delay, with audio redundancy (RED) switched on for the lower tiers so bursty cellular loss is repaired instead of heard, and a climb back up once the link is clean. Listeners deepen their jitter buffer while a link is lossy
 - **Sounds**: banks A and B are ten one-shot pads each with MP3 loading, drag-to-reorder, playback progress rings, loop toggle, per-pad volume (up to 300%), keycap hints, and broadcast mixing. Bank C is a continuous playlist: add several files at once, auto-advance on track end, drag to reorder, transport controls, repeat, per-track run times, and its own fader. Play cuts to a track; Segue starts it over the current track's fade-out on a second deck. Playlist tracks are session-only and never persisted
 - **Mic effects**: a Voice chain (Enhance with noise gate, tone/EQ, compressor with live gain-reduction meter, de-esser) with hold-to-bypass comparison and an optional ten-second sound check; momentary FX pads (Radio Voice, Big Room, Slapback, Pitch Drop) with hold-to-apply, tap-to-latch, and ring-out tails; manual Voice Shift, Delay, and Reverb effects with per-effect settings
 - **Auto-duck**: music channels (Sound Pads, System Audio) can automatically dip about 9 dB under the mic while you speak, with a gentle release
@@ -193,7 +193,7 @@ fly deploy
 │   │   ├── SoundPlaylist.tsx   # Bank C continuous playlist with two-deck segue
 │   │   ├── LevelMeter.tsx      # Stereo VU meter with dBFS scale
 │   │   ├── StatusBar.tsx       # Room ID, timer, connection status
-│   │   ├── HealthPanel.tsx     # RTT, packet loss, jitter display
+│   │   ├── HealthPanel.tsx     # Speed, windowed packet loss, jitter, RTT display
 │   │   ├── EventLog.tsx        # Connection event timeline with chat + CSV export
 │   │   ├── Footer.tsx          # Credits and help modal
 │   │   └── ui/                 # shadcn/ui primitives

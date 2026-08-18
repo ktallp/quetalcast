@@ -53,8 +53,10 @@ export default function DocsReceiver() {
         </p>
         <p className="mt-2">
           Curious about the numbers? Click <strong>Technical details</strong> to reveal the level
-          meter, connection health stats (speed, jitter, delay, packet loss), and the event log.
-          They stay hidden by default so the page stays clean.
+          meter, connection health stats (speed, jitter, delay, packet loss over the last ten
+          seconds), and the event log. They stay hidden by default so the page stays clean. On a
+          flaky link the player also deepens its playback buffer for a moment to ride out the
+          gaps, then shrinks it again once the connection settles.
         </p>
       </section>
 
