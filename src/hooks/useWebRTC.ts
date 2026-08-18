@@ -742,8 +742,23 @@ export function useWebRTC(
         case 'peer-joined': {
           dbg(`[SIG:${role[0].toUpperCase()}] peer-joined: receiverId=${msg.receiverId}, broadcastStream=${!!broadcastStreamRef.current}`);
           if (role === 'broadcaster' && msg.receiverId && broadcastStreamRef.current) {
-            // Await ICE config + PC creation (async)
-            await createPCForReceiver(msg.receiverId as string, broadcastStreamRef.current);
+            // After a signaling reconnect the server re-announces every
+            // listener; the ones whose peer connection survived need nothing.
+            const rid = msg.receiverId as string;
+            const existing = pcsRef.current.get(rid);
+            if (existing && (existing.connectionState === 'connected' || existing.connectionState === 'connecting')) {
+              dbg(`[RTC:B] peer-joined for ${rid} but its PC is ${existing.connectionState}; keeping it`);
+            } else {
+              if (existing) {
+                existing.close();
+                pcsRef.current.delete(rid);
+              }
+              // Await ICE config + PC creation (async)
+              await createPCForReceiver(rid, broadcastStreamRef.current);
+            }
+          } else if (role === 'receiver' && pcRef.current?.connectionState === 'connected') {
+            // Broadcaster came back on signaling; our audio never stopped
+            setStatus('receiving');
           }
           setPeerConnected(true);
           break;
@@ -863,7 +878,9 @@ export function useWebRTC(
   const joinRoomAsBroadcaster = useCallback(
     (roomIdToJoin: string) => {
       setRoomId(roomIdToJoin);
-      signaling.send({ type: 'join-room', roomId: roomIdToJoin, role: 'broadcaster' });
+      // resume lets the server hand us the slot even if our previous socket
+      // still looks open to it (dropped link, browser restart)
+      signaling.send({ type: 'join-room', roomId: roomIdToJoin, role: 'broadcaster', resume: true });
     },
     [signaling],
   );

@@ -6,8 +6,13 @@ export interface SignalingMessage {
   [key: string]: unknown;
 }
 
+/** Server close code: this session was replaced by a newer one from the same account */
+export const WS_CLOSE_REPLACED = 4002;
+
 export interface UseSignalingReturn {
   connected: boolean;
+  /** The server closed this socket because the same user resumed the room elsewhere */
+  replaced: boolean;
   send: (msg: SignalingMessage) => void;
   sendBinary: (data: ArrayBuffer | Uint8Array) => void;
   lastMessage: SignalingMessage | null;
@@ -20,6 +25,7 @@ export function useSignaling(url: string): UseSignalingReturn {
   const wsRef = useRef<WebSocket | null>(null);
   const handlersRef = useRef<Set<(msg: SignalingMessage) => void>>(new Set());
   const [connected, setConnected] = useState(false);
+  const [replaced, setReplaced] = useState(false);
   const [lastMessage, setLastMessage] = useState<SignalingMessage | null>(null);
 
   // Auto-reconnect state
@@ -48,6 +54,12 @@ export function useSignaling(url: string): UseSignalingReturn {
       ws.onclose = (event) => {
         dbg(`[WS] Closed (code: ${event.code}, reason: ${event.reason || 'none'})`);
         setConnected(false);
+        if (event.code === WS_CLOSE_REPLACED) {
+          // Another session of ours took the room; reconnecting would only fight it
+          shouldReconnectRef.current = false;
+          setReplaced(true);
+          return;
+        }
         // Auto-reconnect with exponential backoff
         if (shouldReconnectRef.current) {
           const delay = reconnectDelayRef.current;
@@ -113,5 +125,5 @@ export function useSignaling(url: string): UseSignalingReturn {
     };
   }, []);
 
-  return { connected, send, sendBinary, lastMessage, subscribe, connect, disconnect };
+  return { connected, replaced, send, sendBinary, lastMessage, subscribe, connect, disconnect };
 }

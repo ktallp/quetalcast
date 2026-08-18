@@ -156,7 +156,17 @@ export function useAudioMixer(): UseAudioMixerReturn {
       };
     }
 
-    const ctx = new AudioContext();
+    // Run the whole graph at 48 kHz, the rate Opus and WebRTC use, instead of
+    // whatever the current output device happens to be set to. The browser
+    // resamples device input and output; without this the graph (and every
+    // worklet in it) followed the device rate, and a device switched to e.g.
+    // 32 kHz mid-session dragged the mixer along with it.
+    let ctx: AudioContext;
+    try {
+      ctx = new AudioContext({ sampleRate: 48000 });
+    } catch {
+      ctx = new AudioContext();
+    }
     const dest = ctx.createMediaStreamDestination();
 
     // Create gain nodes

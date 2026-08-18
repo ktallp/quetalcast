@@ -10,6 +10,7 @@ import { createLogger } from './logger.js';
 import { RoomManager, usernameToSlug } from './room-manager.js';
 import { SessionManager, hashPassword, verifyPassword } from './auth.js';
 import { Storage } from './storage.js';
+import { RelayOutput, splitFrames } from './relay-output.js';
 import { testConnection, connectToServer, updateStreamMetadata, buildListenerUrl } from './integration-relay.js';
 import { identifyAudio } from './audio-identify.js';
 import path from 'path';
@@ -561,6 +562,11 @@ function pruneArchives() {
   }
 }
 
+/** True when a buffer starts a WebM/Matroska stream (EBML magic 1A 45 DF A3) */
+function isWebmHeader(buf) {
+  return buf.length >= 4 && buf[0] === 0x1a && buf[1] === 0x45 && buf[2] === 0xdf && buf[3] === 0xa3;
+}
+
 function startRoomTranscoder(room, roomId) {
   if (room.ffmpegProcess || !ffmpegPath) return;
 
@@ -576,6 +582,12 @@ function startRoomTranscoder(room, roomId) {
     '-b:a', '128k',
     '-ar', '44100',
     '-ac', '2',
+    // Every frame stands alone (no bit reservoir) and the stream is bare
+    // frames (no ID3 tag, no Xing header), so silence can be spliced in and
+    // a restarted transcoder joins the byte stream without a glitch.
+    '-reservoir', '0',
+    '-write_xing', '0',
+    '-id3v2_version', '0',
     '-flush_packets', '1',
     'pipe:1',
   ];
@@ -583,6 +595,7 @@ function startRoomTranscoder(room, roomId) {
   const proc = spawn(ffmpegPath, args, { stdio: ['pipe', 'pipe', 'pipe'] });
   room.ffmpegProcess = proc;
   startArchiveTee(room, roomId);
+  ensureRelayOutput(room, roomId);
 
   proc.stdin.on('error', (err) => {
     if (err.code !== 'EPIPE' && err.code !== 'ERR_STREAM_DESTROYED') {
@@ -591,13 +604,8 @@ function startRoomTranscoder(room, roomId) {
   });
 
   proc.stdout.on('data', (mp3Data) => {
-    if (room.archiveStream) {
-      try { room.archiveStream.write(mp3Data); } catch { /* archive error handler cleans up */ }
-    }
-    for (const writer of room.relayListeners) {
-      if (writer.dead) { room.relayListeners.delete(writer); continue; }
-      try { writer.write(mp3Data); } catch { room.relayListeners.delete(writer); }
-    }
+    if (room.relayOutput) room.relayOutput.pushEncoded(mp3Data);
+    else writeRelayData(room, mp3Data);
   });
 
   proc.stderr.on('data', (data) => {
@@ -632,66 +640,137 @@ function stopRoomTranscoder(room) {
 }
 
 // ---------------------------------------------------------------------------
-// Silence keepalive — when the broadcaster disconnects unexpectedly, feed
-// silent MP3 frames to relay listeners so VLC/RadioDJ don't drop the stream.
-// After SILENCE_TIMEOUT_MS without a broadcaster rejoining, tear down for real.
+// Relay output: frame-aligned MP3 with silence fill and burst-on-connect
+// (see relay-output.js). The pacer keeps the byte stream continuous through
+// broadcaster hiccups and, when the broadcaster drops entirely, keeps relay
+// listeners fed with silence for SILENCE_TIMEOUT_MS before tearing down.
 // ---------------------------------------------------------------------------
 const SILENCE_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
-const SILENCE_FRAME_INTERVAL_MS = 250;
+const RELAY_TICK_MS = 100;
+const RELAY_HEALTH_INTERVAL_MS = 2000;
 
-let silentMp3Frame = null;
+let silentFrame = null;
+let silentFrameMs = 0;
 
-function generateSilentMp3Frame() {
-  if (silentMp3Frame) return Promise.resolve();
+/** Write MP3 bytes to the archive and every relay listener */
+function writeRelayData(room, data) {
+  if (room.archiveStream) {
+    try { room.archiveStream.write(data); } catch { /* archive error handler cleans up */ }
+  }
+  for (const writer of room.relayListeners) {
+    if (writer.dead) { room.relayListeners.delete(writer); continue; }
+    try { writer.write(data); } catch { room.relayListeners.delete(writer); }
+  }
+}
+
+function generateSilentFrame() {
+  if (silentFrame) return Promise.resolve();
   if (!ffmpegPath) return Promise.resolve();
   return new Promise((resolve) => {
+    // Same format and flags as the room transcoder so the frames interleave cleanly
     const proc = spawn(ffmpegPath, [
       '-hide_banner', '-loglevel', 'error',
       '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
-      '-t', '0.5',
-      '-f', 'mp3', '-codec:a', 'libmp3lame', '-b:a', '128k',
+      '-t', '1',
+      '-f', 'mp3', '-codec:a', 'libmp3lame', '-b:a', '128k', '-ar', '44100', '-ac', '2',
+      '-reservoir', '0', '-write_xing', '0', '-id3v2_version', '0',
       'pipe:1',
     ], { stdio: ['ignore', 'pipe', 'pipe'] });
     const chunks = [];
     proc.stdout.on('data', (d) => chunks.push(d));
     proc.on('close', () => {
-      if (chunks.length) silentMp3Frame = Buffer.concat(chunks);
+      if (chunks.length) {
+        const { frames } = splitFrames(Buffer.concat(chunks));
+        // Skip the encoder's first frames (priming) and take a steady-state one
+        const pick = frames[Math.min(4, frames.length - 1)];
+        if (pick) {
+          silentFrame = Buffer.from(pick.data);
+          silentFrameMs = pick.ms;
+        }
+      }
       resolve();
     });
     proc.on('error', () => resolve());
   });
 }
 
+/** Create the paced output for a room if it does not exist yet */
+function ensureRelayOutput(room, roomId) {
+  if (room.relayOutput) return room.relayOutput;
+  const out = new RelayOutput({
+    silentFrame,
+    silentFrameMs,
+    emit: (data) => writeRelayData(room, data),
+  });
+  room.relayOutput = out;
+  room.relayTick = setInterval(() => out.tick(), RELAY_TICK_MS);
+  room.relayHealthTimer = setInterval(() => sendRelayHealth(room, roomId), RELAY_HEALTH_INTERVAL_MS);
+  room.relayLastHealthState = null;
+  return out;
+}
+
+function stopRelayOutput(room) {
+  if (room.relayTick) { clearInterval(room.relayTick); room.relayTick = null; }
+  if (room.relayHealthTimer) { clearInterval(room.relayHealthTimer); room.relayHealthTimer = null; }
+  room.relayOutput = null;
+}
+
+/** Push the relay's health to the broadcaster (and log stalls once) */
+function sendRelayHealth(room, roomId) {
+  const out = room.relayOutput;
+  if (!out) return;
+  const h = out.health();
+  const state = !h.streaming ? 'idle' : h.filling ? 'stalled' : 'feeding';
+  if (state !== room.relayLastHealthState) {
+    room.relayLastHealthState = state;
+    if (state === 'stalled') logger.warn({ roomId: roomId.slice(0, 8), ingestAgeMs: h.ingestAgeMs }, 'Relay input stalled; filling with silence');
+    else if (state === 'feeding' && h.lastStallMs) logger.info({ roomId: roomId.slice(0, 8), stallMs: h.lastStallMs }, 'Relay input resumed');
+  }
+  const bcaster = rooms.getBroadcaster(roomId);
+  if (bcaster && bcaster.readyState === 1) {
+    try {
+      bcaster.send(JSON.stringify({
+        type: 'relay-health',
+        state,
+        gapMs: h.gapMs,
+        stalls: h.stalls,
+        lastStallMs: h.lastStallMs,
+        totalFillMs: h.totalFillMs,
+        listeners: room.relayListeners.size,
+      }));
+    } catch { /* socket closing */ }
+  }
+}
+
+/** Broadcaster is gone: keep relay listeners fed for a while, then tear down */
 function startSilenceKeepalive(room, roomId) {
-  if (room.silenceInterval || !silentMp3Frame) return;
-
-  room.silenceInterval = setInterval(() => {
-    for (const writer of room.relayListeners) {
-      if (writer.dead) { room.relayListeners.delete(writer); continue; }
-      try { writer.write(silentMp3Frame); } catch { room.relayListeners.delete(writer); }
-    }
-  }, SILENCE_FRAME_INTERVAL_MS);
-
+  if (room.silenceTimeout || !room.relayOutput) return;
   room.silenceTimeout = setTimeout(() => {
-    logger.info({ roomId: roomId.slice(0, 8) }, 'Silence keepalive expired — tearing down relay');
-    stopSilenceKeepalive(room);
-    for (const writer of room.relayListeners) {
-      try { writer.end(); } catch { /* ignore */ }
-    }
-    room.relayListeners.clear();
+    logger.info({ roomId: roomId.slice(0, 8) }, 'Silence keepalive expired; tearing down relay');
+    teardownRelay(room);
   }, SILENCE_TIMEOUT_MS);
-
   logger.info({ roomId: roomId.slice(0, 8) }, 'Silence keepalive started (10m timeout)');
 }
 
 function stopSilenceKeepalive(room) {
-  if (room.silenceInterval) { clearInterval(room.silenceInterval); room.silenceInterval = null; }
   if (room.silenceTimeout) { clearTimeout(room.silenceTimeout); room.silenceTimeout = null; }
 }
 
+/** End the relay for good: transcoder, pacer, keepalive, and every listener */
+function teardownRelay(room) {
+  stopRoomTranscoder(room);
+  stopSilenceKeepalive(room);
+  stopRelayOutput(room);
+  room.relayHeader = null;
+  for (const writer of room.relayListeners) {
+    try { writer.end(); } catch { /* ignore */ }
+  }
+  room.relayListeners.clear();
+}
+
 // Pre-generate the silent MP3 frame at startup
-generateSilentMp3Frame().then(() => {
-  if (silentMp3Frame) logger.info({ bytes: silentMp3Frame.length }, 'Silent MP3 frame generated for keepalive');
+generateSilentFrame().then(() => {
+  if (silentFrame) logger.info({ bytes: silentFrame.length, ms: silentFrameMs.toFixed(2) }, 'Silent MP3 frame generated for relay fill');
 });
 
 // ICY metadata constants for Icecast-compatible streaming
@@ -833,6 +912,13 @@ app.get('/stream/:roomId', (req, res) => {
     return;
   }
 
+  // Burst-on-connect: hand the player the last few seconds right away so
+  // its buffer starts full instead of empty
+  if (usesMp3 && room.relayOutput) {
+    const burst = room.relayOutput.burst();
+    if (burst.length) writer.write(burst);
+  }
+
   logger.info({ roomId: roomId.slice(0, 8), format: usesMp3 ? 'mp3' : 'webm', icyMeta: wantsIcyMeta, monitor: isMonitor }, 'Relay listener connected');
 
   const cleanupListener = () => {
@@ -936,13 +1022,7 @@ app.delete('/admin/rooms/:id', requireAuth, requireOwner, (req, res) => {
 
   // Tear down relay resources first so the broadcaster's close handler
   // doesn't start the silence keepalive for a room we're force-ending.
-  stopRoomTranscoder(room);
-  stopSilenceKeepalive(room);
-  room.relayHeader = null;
-  for (const writer of room.relayListeners) {
-    try { writer.end(); } catch { /* ignore */ }
-  }
-  room.relayListeners.clear();
+  teardownRelay(room);
 
   const endedMsg = JSON.stringify({ type: 'room-ended', reason: 'Ended by admin' });
   const receiverIds = rooms.getReceiverIds(roomId);
@@ -1543,12 +1623,19 @@ wss.on('connection', (ws, req) => {
 
       if (room) {
         if (ffmpegPath) {
-          // FFmpeg transcoding: always restart transcoder on first chunk of a
-          // new connection so it receives a fresh WebM header for probing.
+          // FFmpeg transcoding: a transcoder is only started on a chunk that
+          // begins a WebM stream (EBML header), so a stray mid-stream chunk
+          // from a recorder that was being replaced cannot wedge FFmpeg on a
+          // failed probe. Chunks arriving with no transcoder are dropped.
           if (!room.ffmpegProcess) {
-            startRoomTranscoder(room, clientRoom);
+            if (isWebmHeader(data)) {
+              startRoomTranscoder(room, clientRoom);
+            } else {
+              logger.debug({ roomId: clientRoom.slice(0, 8) }, 'Relay chunk without WebM header and no transcoder; dropped');
+            }
           }
           if (room.ffmpegProcess?.stdin.writable) {
+            room.relayOutput?.noteIngest();
             try { room.ffmpegProcess.stdin.write(data); } catch { /* EPIPE handled by stdin error handler */ }
           }
         } else {
@@ -1663,6 +1750,20 @@ wss.on('connection', (ws, req) => {
           ws.send(JSON.stringify({ type: 'error', message: 'Authentication required', code: 'AUTH_REQUIRED' }));
           logger.warn({ ip, roomId }, 'Unauthenticated broadcaster join attempt');
           break;
+        }
+        // A resume from the room's owner replaces a broadcaster socket that is
+        // still open. After a dropped link or a browser restart the old socket
+        // can look alive for up to two heartbeats; without this the owner would
+        // be told "Broadcast already in progress" and left waiting.
+        if (role === 'broadcaster' && msg.resume === true) {
+          const resumeRoom = rooms.rooms.get(roomId);
+          const stale = resumeRoom?.broadcaster;
+          if (stale && stale !== ws && resumeRoom.ownerUserId && sessionData?.userId === resumeRoom.ownerUserId) {
+            logger.info({ roomId: roomId.slice(0, 8) }, 'Owner resumed; replacing the previous broadcaster socket');
+            resumeRoom.broadcaster = null;
+            stopRoomTranscoder(resumeRoom);
+            try { stale.close(4002, 'Replaced by a newer session'); } catch { /* already closing */ }
+          }
         }
         const result = rooms.join(roomId, role, ws);
         if (!result.ok) {
@@ -1798,13 +1899,7 @@ wss.on('connection', (ws, req) => {
           if (clientRole === 'broadcaster') {
             const leaveRoom = rooms.rooms.get(clientRoom);
             if (leaveRoom) {
-              stopRoomTranscoder(leaveRoom);
-              stopSilenceKeepalive(leaveRoom);
-              leaveRoom.relayHeader = null;
-              for (const writer of leaveRoom.relayListeners) {
-                try { writer.end(); } catch { /* ignore */ }
-              }
-              leaveRoom.relayListeners.clear();
+              teardownRelay(leaveRoom);
               const relayInfo = rooms.getIntegrationInfo(clientRoom);
               if (relayInfo && relayInfo.localStreamUrl) {
                 if (relayInfo.type) { delete relayInfo.localStreamUrl; }
@@ -2029,15 +2124,22 @@ wss.on('connection', (ws, req) => {
 
   ws.on('close', (code, reason) => {
     if (clientRoom && clientRole) {
-      if (clientRole === 'broadcaster') {
+      if (clientRole === 'broadcaster' && rooms.getBroadcaster(clientRoom) && rooms.getBroadcaster(clientRoom) !== ws) {
+        // This socket was replaced by the owner's newer session; the room
+        // lives on under the new socket, so there is nothing to tear down.
+        logger.info({ roomId: clientRoom.slice(0, 8), code }, 'Replaced broadcaster socket closed');
+      } else if (clientRole === 'broadcaster') {
         const dcRoom = rooms.rooms.get(clientRoom);
         if (dcRoom) {
           stopRoomTranscoder(dcRoom);
           dcRoom.relayHeader = null;
 
-          if (dcRoom.relayListeners.size > 0 && silentMp3Frame) {
-            startSilenceKeepalive(dcRoom, clientRoom);
-          }
+          // The pacer keeps the relay stream alive with silence on its own
+          // (a browser restart or a dropped link should not disconnect
+          // RadioDJ, and a player that reconnects meanwhile still gets a
+          // stream); this only arms the teardown for a broadcaster who
+          // never comes back.
+          if (dcRoom.relayOutput) startSilenceKeepalive(dcRoom, clientRoom);
         }
 
         const receiverIds = rooms.getReceiverIds(clientRoom);
@@ -2326,12 +2428,7 @@ function gracefulShutdown(signal) {
   logger.info({ signal }, 'Shutting down gracefully…');
 
   for (const [roomId, room] of rooms.rooms) {
-    stopSilenceKeepalive(room);
-    stopRoomTranscoder(room);
-    for (const writer of room.relayListeners) {
-      try { writer.end(); } catch { /* ignore */ }
-    }
-    room.relayListeners.clear();
+    teardownRelay(room);
   }
 
   for (const ws of wss.clients) {

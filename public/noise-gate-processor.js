@@ -21,7 +21,7 @@ class NoiseGateProcessor extends AudioWorkletProcessor {
     // Hold counter (samples remaining before gate closes after signal drops)
     this._holdSamples = 0;
     // Hold time in samples (~50ms at 48kHz)
-    this._holdTime = Math.round(0.05 * 48000);
+    this._holdTime = Math.round(0.05 * sampleRate); // 50 ms at the context's rate
     // Smoothing coefficients (attack = open speed, release = close speed)
     this._attackCoeff = 0.01;  // fast open
     this._releaseCoeff = 0.002; // slower close to avoid clicks

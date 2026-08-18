@@ -6,7 +6,7 @@ import { useWebRTC, type ConnectionStatus, type AudioQuality, type EffectiveQual
 import { useAudioAnalyser } from '@/hooks/useAudioAnalyser';
 import { StatusBar } from '@/components/StatusBar';
 import { LevelMeter } from '@/components/LevelMeter';
-import { HealthPanel } from '@/components/HealthPanel';
+import { HealthPanel, type RelayHealth } from '@/components/HealthPanel';
 import { EventLog, createLogEntry, type LogEntry } from '@/components/EventLog';
 import {
   Mic, Radio, Music, Sparkles, Zap, Plug2, Keyboard, Monitor, MonitorOff,
@@ -117,6 +117,10 @@ type PersistedBroadcasterLayout = {
   duckPads: boolean;
   duckSystem: boolean;
   selectedDevice: string;
+  /** Label of the selected input, so it can be found again in browsers that rotate device IDs */
+  selectedDeviceLabel: string;
+  /** System audio was connected when the layout was saved (cannot be restored without a click) */
+  systemAudioActive: boolean;
   sideTab: SideTab;
   effects: Record<EffectName, { enabled: boolean; params: Record<string, number> }>;
 };
@@ -138,6 +142,10 @@ const Broadcaster = () => {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedDevice, setSelectedDevice] = useState('');
+  /** Input saved in the persisted layout, used by device enumeration to restore it */
+  const savedInputRef = useRef<{ id: string; label: string } | null>(null);
+  /** Layout has been read from storage; saving before this would overwrite it with defaults */
+  const [layoutRestored, setLayoutRestored] = useState(false);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [isOnAir, setIsOnAir] = useState(false);
   const [goingOnAir, setGoingOnAir] = useState(false);
@@ -150,6 +158,8 @@ const Broadcaster = () => {
   const [limiterDb, setLimiterDb] = useState<0 | -3 | -6 | -12>(0);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [listenerCount, setListenerCount] = useState(0);
+  const [relayHealth, setRelayHealth] = useState<RelayHealth | null>(null);
+  const relayStateRef = useRef<RelayHealth['state'] | null>(null);
   const [nowPlaying, setNowPlaying] = useState('');
   const [, setNowPlayingCover] = useState<string | undefined>();
   const nowPlayingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -282,16 +292,30 @@ const Broadcaster = () => {
         const allDevices = await navigator.mediaDevices.enumerateDevices();
         const audioInputs = allDevices.filter((d) => d.kind === 'audioinput');
         setDevices(audioInputs);
-        if (audioInputs.length > 0 && !selectedDevice) {
-          setSelectedDevice(audioInputs[0].deviceId);
-        }
         addLog(`Found ${audioInputs.length} audio input${audioInputs.length !== 1 ? 's' : ''}`);
+        if (audioInputs.length === 0) return;
+        // Keep whatever is already chosen (including the restored layout, which
+        // lands before this async work finishes). Match a saved input by ID,
+        // then by label for browsers that hand out new IDs each session, and
+        // only fall back to the first device when the saved one is gone.
+        setSelectedDevice((current) => {
+          if (current && audioInputs.some((d) => d.deviceId === current)) return current;
+          const saved = savedInputRef.current;
+          const byId = saved?.id ? audioInputs.find((d) => d.deviceId === saved.id) : undefined;
+          const byLabel = !byId && saved?.label ? audioInputs.find((d) => d.label === saved.label) : undefined;
+          const match = byId || byLabel;
+          if (match) return match.deviceId;
+          if (saved?.label) {
+            addLog(`Saved input "${saved.label}" not found; using ${audioInputs[0].label || 'the default input'}`, 'warn');
+          }
+          return audioInputs[0].deviceId;
+        });
       } catch (e) {
         addLog('Couldn\'t find audio devices. Check permissions.', 'error');
       }
     }
     getDevices();
-  }, [addLog, selectedDevice]);
+  }, [addLog]);
 
   // Preview stream for level meter when not on air
   const previewStreamRef = useRef<MediaStream | null>(null);
@@ -450,6 +474,39 @@ const Broadcaster = () => {
     if (signaling.connected) addLog('Connected to server');
   }, [signaling.connected]);
 
+  useEffect(() => {
+    if (signaling.replaced) {
+      addLog('This broadcast was resumed from another window or device, so this one has been disconnected.', 'warn');
+      toast.error('Broadcast resumed elsewhere; this window is disconnected');
+    }
+  }, [signaling.replaced]);
+
+  // Rejoin after a socket reconnect while on air. WebRTC listeners ride out
+  // the blip on their own, but the server forgets who we are: without this
+  // the stream relay (RadioDJ, VLC) goes silent for good and new listeners
+  // cannot join. Restarting the relay recorder gives FFmpeg a fresh WebM header.
+  const droppedOnAirRef = useRef(false);
+  useEffect(() => {
+    if (!signaling.connected) {
+      if (isOnAir && webrtc.roomId) {
+        droppedOnAirRef.current = true;
+        addLog('Lost connection to server. Reconnecting…', 'warn');
+      }
+      return;
+    }
+    if (!droppedOnAirRef.current) return;
+    droppedOnAirRef.current = false;
+    if (!isOnAir || !webrtc.roomId) return;
+    addLog('Reconnected to server. Rejoining room and restarting the stream relay.');
+    webrtc.joinRoomAsBroadcaster(webrtc.roomId);
+    relayStream.stopRelay();
+    if (mixer.mixedStream) {
+      relayStream.startRelay(mixer.mixedStream, webrtc.roomId).catch(() => {
+        // Non-fatal: the WebRTC broadcast still works without the relay
+      });
+    }
+  }, [signaling.connected]);
+
   // Handle auth errors and room creation errors from signaling
   useEffect(() => {
     const unsub = signaling.subscribe((msg) => {
@@ -479,6 +536,24 @@ const Broadcaster = () => {
       }
       if (msg.type === 'track-list' && Array.isArray(msg.tracks)) {
         setTrackList(msg.tracks as Track[]);
+      }
+      if (msg.type === 'relay-health' && typeof msg.state === 'string') {
+        const health: RelayHealth = {
+          state: msg.state as RelayHealth['state'],
+          gapMs: typeof msg.gapMs === 'number' ? msg.gapMs : 0,
+          stalls: typeof msg.stalls === 'number' ? msg.stalls : 0,
+          lastStallMs: typeof msg.lastStallMs === 'number' ? msg.lastStallMs : 0,
+          listeners: typeof msg.listeners === 'number' ? msg.listeners : 0,
+        };
+        setRelayHealth(health);
+        // Log transitions only: the relay is a separate pipe from WebRTC, so
+        // this is the only place a stall on it becomes visible to the DJ
+        const prev = relayStateRef.current;
+        relayStateRef.current = health.state;
+        if (prev && prev !== health.state) {
+          if (health.state === 'stalled') addLog('Stream relay input stalled; players are hearing silence until it resumes', 'warn');
+          else if (health.state === 'feeding' && prev === 'stalled') addLog(`Stream relay resumed after ${(health.lastStallMs / 1000).toFixed(1)} s`);
+        }
       }
     });
     return unsub;
@@ -540,6 +615,49 @@ const Broadcaster = () => {
     if (micMuted) mixer.setMicMuted(true);
     addLog('Mic connected');
   }, [selectedDevice, mixer, micEffects, micVolume, micMuted, addLog]);
+
+  // Mic recovery: an OS-level device change (sample rate switched in the
+  // audio settings, interface unplugged and replugged, driver restart) ends
+  // or silences the capture track. Left alone the broadcast just goes quiet
+  // with no way back short of ending it, so re-acquire the same device.
+  useEffect(() => {
+    const track = localStream?.getAudioTracks()[0];
+    if (!track || !isOnAir) return;
+    let muteTimer: ReturnType<typeof setTimeout> | undefined;
+    let cancelled = false;
+    const recover = (why: string) => {
+      if (cancelled) return;
+      cancelled = true; // this track is done; the new stream gets its own listeners
+      addLog(`Mic input ${why}. Reconnecting the input device…`, 'warn');
+      localStream?.getTracks().forEach((t) => t.stop());
+      const attempt = (n: number) => {
+        connectMicForBroadcast()
+          .then(() => addLog('Mic input reconnected'))
+          .catch(() => {
+            if (n < 4) setTimeout(() => attempt(n + 1), 2000 * (n + 1));
+            else addLog('Could not reconnect the mic input. Check the device and reselect it in Audio Setup.', 'error');
+          });
+      };
+      // Give the OS a moment to bring the device back at its new settings
+      setTimeout(() => attempt(0), 1000);
+    };
+    const onEnded = () => recover('stopped (device removed or reconfigured)');
+    const onMute = () => {
+      // Brief mutes happen; a sustained one means the device stopped delivering
+      muteTimer = setTimeout(() => recover('went silent (device paused or reconfigured)'), 3000);
+    };
+    const onUnmute = () => { if (muteTimer) clearTimeout(muteTimer); };
+    track.addEventListener('ended', onEnded);
+    track.addEventListener('mute', onMute);
+    track.addEventListener('unmute', onUnmute);
+    return () => {
+      cancelled = true;
+      if (muteTimer) clearTimeout(muteTimer);
+      track.removeEventListener('ended', onEnded);
+      track.removeEventListener('mute', onMute);
+      track.removeEventListener('unmute', onUnmute);
+    };
+  }, [localStream, isOnAir, connectMicForBroadcast, addLog]);
 
   const doGoOnAir = useCallback(async () => {
     setGoingOnAir(true);
@@ -703,6 +821,8 @@ const Broadcaster = () => {
     }
     if (!isOnAir) {
       relayStartedRef.current = false;
+      setRelayHealth(null);
+      relayStateRef.current = null;
     }
   }, [isOnAir, mixer.mixedStream, webrtc.roomId, relayStream]);
 
@@ -1089,9 +1209,16 @@ const Broadcaster = () => {
     if (restoredLayoutRef.current) return;
     restoredLayoutRef.current = true;
     const saved = readPersistedLayout();
+    setLayoutRestored(true);
     if (!saved) return;
 
-    if (saved.selectedDevice) setSelectedDevice(saved.selectedDevice);
+    if (saved.selectedDevice || saved.selectedDeviceLabel) {
+      savedInputRef.current = { id: saved.selectedDevice || '', label: saved.selectedDeviceLabel || '' };
+      if (saved.selectedDevice) setSelectedDevice(saved.selectedDevice);
+    }
+    if (saved.systemAudioActive) {
+      addLog('System audio was connected last time. Browsers need a click to share it again: reconnect it in Audio Setup.', 'warn');
+    }
     if (saved.qualityMode) {
       setQualityMode(saved.qualityMode);
       webrtc.setAudioQuality(saved.qualityMode);
@@ -1132,6 +1259,8 @@ const Broadcaster = () => {
   }, [micEffects, mixer, webrtc]);
 
   useEffect(() => {
+    // Wait for the restore pass; the first render's defaults must not overwrite the saved layout
+    if (!layoutRestored) return;
     const payload: PersistedBroadcasterLayout = {
       qualityMode,
       limiterDb,
@@ -1153,6 +1282,8 @@ const Broadcaster = () => {
       duckPads,
       duckSystem,
       selectedDevice,
+      selectedDeviceLabel: devices.find((d) => d.deviceId === selectedDevice)?.label || '',
+      systemAudioActive,
       sideTab,
       effects: micEffects.effects,
     };
@@ -1182,8 +1313,11 @@ const Broadcaster = () => {
     duckPads,
     duckSystem,
     selectedDevice,
+    devices,
+    systemAudioActive,
     sideTab,
     micEffects.effects,
+    layoutRestored,
   ]);
 
   const channelStates: ChannelStripState[] = [
@@ -1622,11 +1756,13 @@ const Broadcaster = () => {
                     <div className="space-y-4">
                       <EventLog entries={logs} roomId={webrtc.roomId ?? undefined} listenerCount={isOnAir ? listenerCount : undefined} />
                       <HealthPanel
+                        role="broadcaster"
                         stats={webrtc.stats}
                         connectionState={webrtc.connectionState}
                         iceConnectionState={webrtc.iceConnectionState}
                         signalingState={webrtc.signalingState}
                         peerConnected={webrtc.peerConnected}
+                        relay={isOnAir ? relayHealth : null}
                       />
                     </div>
                   ),

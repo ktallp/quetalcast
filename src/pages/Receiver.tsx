@@ -540,6 +540,7 @@ const Receiver = () => {
         {joined && showTechnical && webrtc.status !== 'error' && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <HealthPanel
+              role="receiver"
               stats={webrtc.stats}
               connectionState={webrtc.connectionState}
               iceConnectionState={webrtc.iceConnectionState}
