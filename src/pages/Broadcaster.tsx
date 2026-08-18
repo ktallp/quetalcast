@@ -616,6 +616,49 @@ const Broadcaster = () => {
     addLog('Mic connected');
   }, [selectedDevice, mixer, micEffects, micVolume, micMuted, addLog]);
 
+  // Mic recovery: an OS-level device change (sample rate switched in the
+  // audio settings, interface unplugged and replugged, driver restart) ends
+  // or silences the capture track. Left alone the broadcast just goes quiet
+  // with no way back short of ending it, so re-acquire the same device.
+  useEffect(() => {
+    const track = localStream?.getAudioTracks()[0];
+    if (!track || !isOnAir) return;
+    let muteTimer: ReturnType<typeof setTimeout> | undefined;
+    let cancelled = false;
+    const recover = (why: string) => {
+      if (cancelled) return;
+      cancelled = true; // this track is done; the new stream gets its own listeners
+      addLog(`Mic input ${why}. Reconnecting the input device…`, 'warn');
+      localStream?.getTracks().forEach((t) => t.stop());
+      const attempt = (n: number) => {
+        connectMicForBroadcast()
+          .then(() => addLog('Mic input reconnected'))
+          .catch(() => {
+            if (n < 4) setTimeout(() => attempt(n + 1), 2000 * (n + 1));
+            else addLog('Could not reconnect the mic input. Check the device and reselect it in Audio Setup.', 'error');
+          });
+      };
+      // Give the OS a moment to bring the device back at its new settings
+      setTimeout(() => attempt(0), 1000);
+    };
+    const onEnded = () => recover('stopped (device removed or reconfigured)');
+    const onMute = () => {
+      // Brief mutes happen; a sustained one means the device stopped delivering
+      muteTimer = setTimeout(() => recover('went silent (device paused or reconfigured)'), 3000);
+    };
+    const onUnmute = () => { if (muteTimer) clearTimeout(muteTimer); };
+    track.addEventListener('ended', onEnded);
+    track.addEventListener('mute', onMute);
+    track.addEventListener('unmute', onUnmute);
+    return () => {
+      cancelled = true;
+      if (muteTimer) clearTimeout(muteTimer);
+      track.removeEventListener('ended', onEnded);
+      track.removeEventListener('mute', onMute);
+      track.removeEventListener('unmute', onUnmute);
+    };
+  }, [localStream, isOnAir, connectMicForBroadcast, addLog]);
+
   const doGoOnAir = useCallback(async () => {
     setGoingOnAir(true);
     try {

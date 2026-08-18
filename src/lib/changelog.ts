@@ -21,6 +21,7 @@ export const CHANGELOG: ChangelogEntry[] = [
     fixes: [
       'A dropped signaling connection while on air silently killed the stream relay for the rest of the show and stopped new listeners from joining; the console now rejoins the room and restarts the relay when the socket comes back, and an owner\'s resume takes over even if the server still holds the previous session',
       'The selected input device is restored after a browser restart: device enumeration no longer overwrites the saved choice with the first device, and the input is matched by name when the browser hands out new IDs. The log reminds you when system audio was connected last time',
+      'The mixer now runs at a fixed 48 kHz instead of following the output device\'s rate, and if the OS restarts the input device mid-show (sample rate changed in the audio settings, interface replugged) the console reconnects the same input automatically instead of going silent',
     ],
   },
   {

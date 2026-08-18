@@ -451,6 +451,13 @@ export default function DocsBroadcaster() {
             you when it was on last time.
           </li>
           <li>
+            <strong>Input recovery</strong>: if the operating system restarts your input device
+            while you are on air (for example after changing its sample rate in the audio
+            settings, or replugging an interface), the console reconnects the same input within
+            a few seconds and notes it in the log. The mixer itself always runs at 48 kHz, so a
+            device rate change does not affect the effects, meters, or the broadcast.
+          </li>
+          <li>
             <strong>Logout is global</strong>: logging out signs you out everywhere, not just in
             the current browser.
           </li>
