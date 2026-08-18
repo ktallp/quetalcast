@@ -9,6 +9,15 @@ export interface WebRTCStats {
   jitter: number;
   /** Round-trip time, ms (0 when unknown) */
   rtt: number;
+  /** Receiver only: average jitter buffer delay over the last interval, ms */
+  jitterBufferMs: number;
+  /**
+   * Receiver only: estimated end-to-end delay from the broadcaster's mic to
+   * this device's speaker, ms (0 when unknown). One-way network (RTT/2) +
+   * jitter buffer + playout + a fixed allowance for capture and encoding.
+   * RTT alone is not what a listener experiences as delay.
+   */
+  latency: number;
   audioLevel: number;
   timestamp: number;
 }
@@ -32,7 +41,14 @@ interface PcHistory {
   bytes?: number;
   timestamp?: number;
   samples: Sample[];
+  jbDelay?: number;
+  jbCount?: number;
+  playoutDelay?: number;
+  playoutCount?: number;
 }
+
+/** Capture + Opus framing + encode on the sending side, not visible in any stat */
+const CAPTURE_ENCODE_MS = 30;
 
 /** Stats history keyed by peer connection so several PCs can be polled independently */
 let histories = new WeakMap<RTCPeerConnection, PcHistory>();
@@ -69,6 +85,8 @@ export async function parseStats(
     lossRate: 0,
     jitter: 0,
     rtt: 0,
+    jitterBufferMs: 0,
+    latency: 0,
     audioLevel: 0,
     timestamp: Date.now(),
   };
@@ -82,6 +100,10 @@ export async function parseStats(
   let sampleTimestamp = 0;
   let hasRemoteReport = false;
   let candidatePairRtt = 0;
+  let jbDelay: number | undefined;
+  let jbCount: number | undefined;
+  let playoutDelay: number | undefined;
+  let playoutCount: number | undefined;
 
   stats.forEach((report) => {
     if (role === 'receiver' && report.type === 'inbound-rtp' && report.kind === 'audio') {
@@ -91,6 +113,14 @@ export async function parseStats(
       bytes = report.bytesReceived ?? 0;
       bytesTimestamp = report.timestamp;
       sampleTimestamp = report.timestamp;
+      jbDelay = report.jitterBufferDelay;
+      jbCount = report.jitterBufferEmittedCount;
+    }
+
+    // Chrome reports the audio device playout delay separately
+    if (role === 'receiver' && report.type === 'media-playout' && report.kind === 'audio') {
+      playoutDelay = report.totalPlayoutDelay;
+      playoutCount = report.totalSamplesCount;
     }
 
     if (role === 'broadcaster' && report.type === 'outbound-rtp' && report.kind === 'audio') {
@@ -121,6 +151,29 @@ export async function parseStats(
   });
 
   if (result.rtt === 0 && candidatePairRtt > 0) result.rtt = candidatePairRtt;
+
+  // Receiver: jitter buffer and playout delays are cumulative sums; average
+  // them over the interval since the last poll
+  if (role === 'receiver') {
+    if (jbDelay !== undefined && jbCount !== undefined) {
+      if (history.jbDelay !== undefined && history.jbCount !== undefined && jbCount > history.jbCount) {
+        result.jitterBufferMs = ((jbDelay - history.jbDelay) / (jbCount - history.jbCount)) * 1000;
+      }
+      history.jbDelay = jbDelay;
+      history.jbCount = jbCount;
+    }
+    let playoutMs = 0;
+    if (playoutDelay !== undefined && playoutCount !== undefined) {
+      if (history.playoutDelay !== undefined && history.playoutCount !== undefined && playoutCount > history.playoutCount) {
+        playoutMs = ((playoutDelay - history.playoutDelay) / (playoutCount - history.playoutCount)) * 1000;
+      }
+      history.playoutDelay = playoutDelay;
+      history.playoutCount = playoutCount;
+    }
+    if (result.jitterBufferMs > 0) {
+      result.latency = result.rtt / 2 + result.jitterBufferMs + playoutMs + CAPTURE_ENCODE_MS;
+    }
+  }
 
   // Bitrate over the last poll interval
   if (bytes !== undefined && bytesTimestamp !== undefined) {

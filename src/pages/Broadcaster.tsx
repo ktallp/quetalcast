@@ -6,7 +6,7 @@ import { useWebRTC, type ConnectionStatus, type AudioQuality, type EffectiveQual
 import { useAudioAnalyser } from '@/hooks/useAudioAnalyser';
 import { StatusBar } from '@/components/StatusBar';
 import { LevelMeter } from '@/components/LevelMeter';
-import { HealthPanel } from '@/components/HealthPanel';
+import { HealthPanel, type RelayHealth } from '@/components/HealthPanel';
 import { EventLog, createLogEntry, type LogEntry } from '@/components/EventLog';
 import {
   Mic, Radio, Music, Sparkles, Zap, Plug2, Keyboard, Monitor, MonitorOff,
@@ -150,6 +150,8 @@ const Broadcaster = () => {
   const [limiterDb, setLimiterDb] = useState<0 | -3 | -6 | -12>(0);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [listenerCount, setListenerCount] = useState(0);
+  const [relayHealth, setRelayHealth] = useState<RelayHealth | null>(null);
+  const relayStateRef = useRef<RelayHealth['state'] | null>(null);
   const [nowPlaying, setNowPlaying] = useState('');
   const [, setNowPlayingCover] = useState<string | undefined>();
   const nowPlayingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -506,6 +508,24 @@ const Broadcaster = () => {
       if (msg.type === 'track-list' && Array.isArray(msg.tracks)) {
         setTrackList(msg.tracks as Track[]);
       }
+      if (msg.type === 'relay-health' && typeof msg.state === 'string') {
+        const health: RelayHealth = {
+          state: msg.state as RelayHealth['state'],
+          gapMs: typeof msg.gapMs === 'number' ? msg.gapMs : 0,
+          stalls: typeof msg.stalls === 'number' ? msg.stalls : 0,
+          lastStallMs: typeof msg.lastStallMs === 'number' ? msg.lastStallMs : 0,
+          listeners: typeof msg.listeners === 'number' ? msg.listeners : 0,
+        };
+        setRelayHealth(health);
+        // Log transitions only: the relay is a separate pipe from WebRTC, so
+        // this is the only place a stall on it becomes visible to the DJ
+        const prev = relayStateRef.current;
+        relayStateRef.current = health.state;
+        if (prev && prev !== health.state) {
+          if (health.state === 'stalled') addLog('Stream relay input stalled; players are hearing silence until it resumes', 'warn');
+          else if (health.state === 'feeding' && prev === 'stalled') addLog(`Stream relay resumed after ${(health.lastStallMs / 1000).toFixed(1)} s`);
+        }
+      }
     });
     return unsub;
   }, [signaling, addLog]);
@@ -729,6 +749,8 @@ const Broadcaster = () => {
     }
     if (!isOnAir) {
       relayStartedRef.current = false;
+      setRelayHealth(null);
+      relayStateRef.current = null;
     }
   }, [isOnAir, mixer.mixedStream, webrtc.roomId, relayStream]);
 
@@ -1648,11 +1670,13 @@ const Broadcaster = () => {
                     <div className="space-y-4">
                       <EventLog entries={logs} roomId={webrtc.roomId ?? undefined} listenerCount={isOnAir ? listenerCount : undefined} />
                       <HealthPanel
+                        role="broadcaster"
                         stats={webrtc.stats}
                         connectionState={webrtc.connectionState}
                         iceConnectionState={webrtc.iceConnectionState}
                         signalingState={webrtc.signalingState}
                         peerConnected={webrtc.peerConnected}
+                        relay={isOnAir ? relayHealth : null}
                       />
                     </div>
                   ),

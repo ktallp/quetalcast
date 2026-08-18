@@ -1,12 +1,25 @@
 import { BarChart2 } from 'lucide-react';
 import type { WebRTCStats } from '@/lib/webrtc-stats';
 
+/** Health of the HTTP relay (RadioDJ, VLC), as pushed by the server */
+export interface RelayHealth {
+  state: 'idle' | 'feeding' | 'stalled';
+  /** How long the current stall has lasted, ms */
+  gapMs: number;
+  stalls: number;
+  lastStallMs: number;
+  listeners: number;
+}
+
 interface HealthPanelProps {
+  role: 'broadcaster' | 'receiver';
   stats: WebRTCStats | null;
   connectionState: string;
   iceConnectionState: string;
   signalingState: string;
   peerConnected: boolean;
+  /** Broadcaster only; null while the relay is not running */
+  relay?: RelayHealth | null;
 }
 
 function StatItem({ label, value, unit, warn, title }: { label: string; value: string | number; unit?: string; warn?: boolean; title?: string }) {
@@ -22,12 +35,15 @@ function StatItem({ label, value, unit, warn, title }: { label: string; value: s
   );
 }
 
-function StateIndicator({ label, value }: { label: string; value: string }) {
+function StateIndicator({ label, value, text, title }: { label: string; value: string; text?: string; title?: string }) {
   const colorMap: Record<string, string> = {
     connected: 'text-primary',
     completed: 'text-primary',
     stable: 'text-primary',
+    feeding: 'text-primary',
     lossy: 'text-yellow-500',
+    stalled: 'text-yellow-500',
+    idle: 'text-muted-foreground',
     checking: 'text-accent',
     connecting: 'text-accent',
     'have-local-offer': 'text-accent',
@@ -43,6 +59,9 @@ function StateIndicator({ label, value }: { label: string; value: string }) {
     completed: 'Good',
     stable: 'Stable',
     lossy: 'Lossy',
+    feeding: 'Feeding',
+    stalled: 'Stalled',
+    idle: 'Waiting for audio',
     checking: 'Checking…',
     connecting: 'Connecting…',
     'have-local-offer': 'Setting up…',
@@ -54,11 +73,21 @@ function StateIndicator({ label, value }: { label: string; value: string }) {
   };
 
   return (
-    <div className="flex items-center justify-between text-xs">
+    <div className="flex items-center justify-between text-xs" title={title}>
       <span className="font-mono text-muted-foreground uppercase">{label}</span>
-      <span className={`font-mono font-semibold ${colorMap[value] || 'text-foreground'}`}>{friendlyValue[value] || value}</span>
+      <span className={`font-mono font-semibold ${colorMap[value] || 'text-foreground'}`}>{text ?? friendlyValue[value] ?? value}</span>
     </div>
   );
+}
+
+/** Text for the Relay line: state plus stall duration and player count */
+function relayText(relay: RelayHealth): string {
+  if (relay.state === 'stalled') return `Stalled ${(relay.gapMs / 1000).toFixed(1)} s`;
+  if (relay.state === 'feeding') {
+    const players = `${relay.listeners} player${relay.listeners === 1 ? '' : 's'}`;
+    return relay.stalls > 0 ? `Feeding, ${players}, ${relay.stalls} stall${relay.stalls === 1 ? '' : 's'}` : `Feeding, ${players}`;
+  }
+  return 'Waiting for audio';
 }
 
 /** Loss over the recent window above this reads as a problem (percent) */
@@ -66,8 +95,24 @@ const LOSS_WARN_PERCENT = 2;
 /** Above this the transport is up but audio is audibly suffering (percent) */
 const LOSS_STREAM_PERCENT = 5;
 
-export function HealthPanel({ stats, connectionState, iceConnectionState, signalingState, peerConnected }: HealthPanelProps) {
+export function HealthPanel({ role, stats, connectionState, iceConnectionState, signalingState, peerConnected, relay }: HealthPanelProps) {
   const lossRate = stats?.lossRate ?? 0;
+  // A listener sees the delay it actually hears (network + jitter buffer +
+  // playout); the broadcaster only knows the round trip to its worst listener,
+  // which is not what anyone experiences as delay, so it is labelled as such.
+  const delayItem = role === 'receiver'
+    ? {
+        label: 'Latency',
+        value: stats && stats.latency > 0 ? stats.latency.toFixed(0) : '—',
+        title: stats && stats.latency > 0
+          ? `Estimated mic-to-speaker delay: ${(stats.rtt / 2).toFixed(0)} ms network + ${stats.jitterBufferMs.toFixed(0)} ms jitter buffer + playout and encoding`
+          : 'Estimated mic-to-speaker delay',
+      }
+    : {
+        label: 'RTT',
+        value: stats ? stats.rtt.toFixed(0) : '—',
+        title: 'Round trip to the listener having the hardest time. Their audible delay is larger (jitter buffer and playout are added on their side).',
+      };
   // The connection state only says the transport is up; fold recent loss into
   // the Stream line so "Good" is not shown next to a red loss figure.
   const streamState = connectionState === 'connected' && lossRate > LOSS_STREAM_PERCENT ? 'lossy' : connectionState;
@@ -89,7 +134,7 @@ export function HealthPanel({ stats, connectionState, iceConnectionState, signal
           title={stats ? `${stats.packetsLost} packets lost since connecting` : undefined}
         />
         <StatItem label="Jitter" value={stats ? stats.jitter.toFixed(1) : '—'} unit="ms" />
-        <StatItem label="Delay" value={stats ? stats.rtt.toFixed(0) : '—'} unit="ms" />
+        <StatItem label={delayItem.label} value={delayItem.value} unit="ms" title={delayItem.title} />
       </div>
 
       {/* Connection states */}
@@ -97,6 +142,14 @@ export function HealthPanel({ stats, connectionState, iceConnectionState, signal
         <StateIndicator label="Stream" value={streamState} />
         <StateIndicator label="Network" value={iceConnectionState} />
         <StateIndicator label="Server" value={signalingState} />
+        {role === 'broadcaster' && relay && (
+          <StateIndicator
+            label="Relay"
+            value={relay.state}
+            text={relayText(relay)}
+            title="The MP3 stream URL used by RadioDJ, VLC and other players. It runs on a separate connection from WebRTC listeners; a stall here is filled with silence so players stay connected."
+          />
+        )}
         <div className="flex items-center justify-between text-xs">
           <span className="font-mono text-muted-foreground uppercase">Peer</span>
           <span className={`font-mono font-semibold ${peerConnected ? 'text-primary' : 'text-muted-foreground'}`}>
