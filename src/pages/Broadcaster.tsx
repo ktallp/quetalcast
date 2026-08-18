@@ -117,6 +117,10 @@ type PersistedBroadcasterLayout = {
   duckPads: boolean;
   duckSystem: boolean;
   selectedDevice: string;
+  /** Label of the selected input, so it can be found again in browsers that rotate device IDs */
+  selectedDeviceLabel: string;
+  /** System audio was connected when the layout was saved (cannot be restored without a click) */
+  systemAudioActive: boolean;
   sideTab: SideTab;
   effects: Record<EffectName, { enabled: boolean; params: Record<string, number> }>;
 };
@@ -138,6 +142,10 @@ const Broadcaster = () => {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedDevice, setSelectedDevice] = useState('');
+  /** Input saved in the persisted layout, used by device enumeration to restore it */
+  const savedInputRef = useRef<{ id: string; label: string } | null>(null);
+  /** Layout has been read from storage; saving before this would overwrite it with defaults */
+  const [layoutRestored, setLayoutRestored] = useState(false);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [isOnAir, setIsOnAir] = useState(false);
   const [goingOnAir, setGoingOnAir] = useState(false);
@@ -284,16 +292,30 @@ const Broadcaster = () => {
         const allDevices = await navigator.mediaDevices.enumerateDevices();
         const audioInputs = allDevices.filter((d) => d.kind === 'audioinput');
         setDevices(audioInputs);
-        if (audioInputs.length > 0 && !selectedDevice) {
-          setSelectedDevice(audioInputs[0].deviceId);
-        }
         addLog(`Found ${audioInputs.length} audio input${audioInputs.length !== 1 ? 's' : ''}`);
+        if (audioInputs.length === 0) return;
+        // Keep whatever is already chosen (including the restored layout, which
+        // lands before this async work finishes). Match a saved input by ID,
+        // then by label for browsers that hand out new IDs each session, and
+        // only fall back to the first device when the saved one is gone.
+        setSelectedDevice((current) => {
+          if (current && audioInputs.some((d) => d.deviceId === current)) return current;
+          const saved = savedInputRef.current;
+          const byId = saved?.id ? audioInputs.find((d) => d.deviceId === saved.id) : undefined;
+          const byLabel = !byId && saved?.label ? audioInputs.find((d) => d.label === saved.label) : undefined;
+          const match = byId || byLabel;
+          if (match) return match.deviceId;
+          if (saved?.label) {
+            addLog(`Saved input "${saved.label}" not found; using ${audioInputs[0].label || 'the default input'}`, 'warn');
+          }
+          return audioInputs[0].deviceId;
+        });
       } catch (e) {
         addLog('Couldn\'t find audio devices. Check permissions.', 'error');
       }
     }
     getDevices();
-  }, [addLog, selectedDevice]);
+  }, [addLog]);
 
   // Preview stream for level meter when not on air
   const previewStreamRef = useRef<MediaStream | null>(null);
@@ -1137,9 +1159,16 @@ const Broadcaster = () => {
     if (restoredLayoutRef.current) return;
     restoredLayoutRef.current = true;
     const saved = readPersistedLayout();
+    setLayoutRestored(true);
     if (!saved) return;
 
-    if (saved.selectedDevice) setSelectedDevice(saved.selectedDevice);
+    if (saved.selectedDevice || saved.selectedDeviceLabel) {
+      savedInputRef.current = { id: saved.selectedDevice || '', label: saved.selectedDeviceLabel || '' };
+      if (saved.selectedDevice) setSelectedDevice(saved.selectedDevice);
+    }
+    if (saved.systemAudioActive) {
+      addLog('System audio was connected last time. Browsers need a click to share it again: reconnect it in Audio Setup.', 'warn');
+    }
     if (saved.qualityMode) {
       setQualityMode(saved.qualityMode);
       webrtc.setAudioQuality(saved.qualityMode);
@@ -1180,6 +1209,8 @@ const Broadcaster = () => {
   }, [micEffects, mixer, webrtc]);
 
   useEffect(() => {
+    // Wait for the restore pass; the first render's defaults must not overwrite the saved layout
+    if (!layoutRestored) return;
     const payload: PersistedBroadcasterLayout = {
       qualityMode,
       limiterDb,
@@ -1201,6 +1232,8 @@ const Broadcaster = () => {
       duckPads,
       duckSystem,
       selectedDevice,
+      selectedDeviceLabel: devices.find((d) => d.deviceId === selectedDevice)?.label || '',
+      systemAudioActive,
       sideTab,
       effects: micEffects.effects,
     };
@@ -1230,8 +1263,11 @@ const Broadcaster = () => {
     duckPads,
     duckSystem,
     selectedDevice,
+    devices,
+    systemAudioActive,
     sideTab,
     micEffects.effects,
+    layoutRestored,
   ]);
 
   const channelStates: ChannelStripState[] = [
