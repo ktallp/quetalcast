@@ -582,10 +582,18 @@ export function useWebRTC(
         const mungedSdp = mungeOpusSdp(offer.sdp!, audioQualityModeRef.current === 'low' ? 'low' : 'high');
         // Build the init explicitly: spreading an RTCSessionDescription instance
         // drops its prototype getters (type becomes undefined) in some browsers
-        const mungedOffer: RTCSessionDescriptionInit = { type: offer.type ?? 'offer', sdp: mungedSdp };
-        await pc.setLocalDescription(mungedOffer);
+        let localOffer: RTCSessionDescriptionInit = { type: offer.type ?? 'offer', sdp: mungedSdp };
+        try {
+          await pc.setLocalDescription(localOffer);
+        } catch (e) {
+          // Browsers are tightening up on modified SDP in setLocalDescription;
+          // a plain offer still gets a working connection at default settings
+          dbgWarn('[RTC:B] Modified offer rejected, using the browser default', e);
+          localOffer = { type: offer.type ?? 'offer', sdp: offer.sdp };
+          await pc.setLocalDescription(localOffer);
+        }
         dbg(`[RTC:B] Offer created & sent to receiver ${receiverId}`);
-        signaling.send({ type: 'offer', sdp: mungedOffer, receiverId });
+        signaling.send({ type: 'offer', sdp: localOffer, receiverId });
 
         applyTierToSenders(pc, QUALITY_TIERS[startTier], false);
       } catch (e) {
@@ -798,11 +806,18 @@ export function useWebRTC(
                 const offered = extractOpusFmtp(offerInit.sdp ?? '');
                 const echo: Record<string, string> = {};
                 for (const k of ECHOED_OPUS_PARAMS) if (offered[k] !== undefined) echo[k] = offered[k];
-                const answerInit: RTCSessionDescriptionInit = {
+                let answerInit: RTCSessionDescriptionInit = {
                   type: answer.type ?? 'answer',
                   sdp: Object.keys(echo).length > 0 && answer.sdp ? mungeOpusSdpParams(answer.sdp, echo) : answer.sdp,
                 };
-                await pc.setLocalDescription(answerInit);
+                try {
+                  await pc.setLocalDescription(answerInit);
+                } catch (e) {
+                  // Never let the echo cost us the connection: fall back to the plain answer
+                  dbgWarn('[RTC:R] Modified answer rejected, using the browser default', e);
+                  answerInit = { type: answer.type ?? 'answer', sdp: answer.sdp };
+                  await pc.setLocalDescription(answerInit);
+                }
                 dbg('[RTC:R] Answer created & sent');
                 signaling.send({ type: 'answer', sdp: answerInit });
               } catch (e) {
@@ -905,7 +920,7 @@ export function useWebRTC(
           evaluateAutoQuality(rid, s);
           if (!worst || s.lossRate > worst.lossRate) worst = s;
         }
-        if (worst) setStats(worst);
+        setStats(worst);
       }, 1000);
 
       reportIntervalRef.current = setInterval(async () => {

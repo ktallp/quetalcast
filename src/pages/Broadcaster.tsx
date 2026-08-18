@@ -159,6 +159,7 @@ const Broadcaster = () => {
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [listenerCount, setListenerCount] = useState(0);
   const [relayHealth, setRelayHealth] = useState<RelayHealth | null>(null);
+  const [serverRtt, setServerRtt] = useState<number | null>(null);
   const relayStateRef = useRef<RelayHealth['state'] | null>(null);
   const [nowPlaying, setNowPlaying] = useState('');
   const [, setNowPlayingCover] = useState<string | undefined>();
@@ -537,6 +538,9 @@ const Broadcaster = () => {
       if (msg.type === 'track-list' && Array.isArray(msg.tracks)) {
         setTrackList(msg.tracks as Track[]);
       }
+      if (msg.type === 'pong' && typeof msg.t === 'number') {
+        setServerRtt(Math.max(0, Date.now() - msg.t));
+      }
       if (msg.type === 'relay-health' && typeof msg.state === 'string') {
         const health: RelayHealth = {
           state: msg.state as RelayHealth['state'],
@@ -558,6 +562,20 @@ const Broadcaster = () => {
     });
     return unsub;
   }, [signaling, addLog]);
+
+  // Round trip to the server while on air, for the Stats panel when the only
+  // listeners are on the relay (RadioDJ, VLC) and there is no WebRTC RTT
+  useEffect(() => {
+    if (!isOnAir || !signaling.connected) {
+      setServerRtt(null);
+      return;
+    }
+    const send = signaling.send;
+    const tick = () => send({ type: 'ping', t: Date.now() });
+    tick();
+    const timer = setInterval(tick, 5000);
+    return () => clearInterval(timer);
+  }, [isOnAir, signaling.connected, signaling.send]);
 
   // Log status changes
   const prevStatus = useRef<ConnectionStatus>('idle');
@@ -1763,6 +1781,7 @@ const Broadcaster = () => {
                         signalingState={webrtc.signalingState}
                         peerConnected={webrtc.peerConnected}
                         relay={isOnAir ? relayHealth : null}
+                        relayLink={isOnAir && relayStream.active ? { uploadKbps: relayStream.uploadKbps, rttMs: serverRtt } : null}
                       />
                     </div>
                   ),

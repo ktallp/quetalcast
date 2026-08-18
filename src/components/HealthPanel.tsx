@@ -20,6 +20,8 @@ interface HealthPanelProps {
   peerConnected: boolean;
   /** Broadcaster only; null while the relay is not running */
   relay?: RelayHealth | null;
+  /** Broadcaster only: our own link to the server, shown when no browser listener is connected */
+  relayLink?: { uploadKbps: number; rttMs: number | null } | null;
 }
 
 function StatItem({ label, value, unit, warn, title }: { label: string; value: string | number; unit?: string; warn?: boolean; title?: string }) {
@@ -95,8 +97,13 @@ const LOSS_WARN_PERCENT = 2;
 /** Above this the transport is up but audio is audibly suffering (percent) */
 const LOSS_STREAM_PERCENT = 5;
 
-export function HealthPanel({ role, stats, connectionState, iceConnectionState, signalingState, peerConnected, relay }: HealthPanelProps) {
+export function HealthPanel({ role, stats, connectionState, iceConnectionState, signalingState, peerConnected, relay, relayLink }: HealthPanelProps) {
   const lossRate = stats?.lossRate ?? 0;
+  // The four tiles measure WebRTC listeners. With none connected (RadioDJ or
+  // VLC on the relay only) the broadcaster still has a link worth showing:
+  // its own upload to the server and the round trip to it. Loss and jitter
+  // do not exist on that TCP path; stalls appear on the Relay line instead.
+  const showingRelayLink = role === 'broadcaster' && !stats && !!relayLink;
   // A listener sees the delay it actually hears (network + jitter buffer +
   // playout); the broadcaster only knows the round trip to its worst listener,
   // which is not what anyone experiences as delay, so it is labelled as such.
@@ -125,17 +132,33 @@ export function HealthPanel({ role, stats, connectionState, iceConnectionState, 
 
       {/* Stats grid — 2 col on mobile, 4 col on desktop */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <StatItem label="Speed" value={stats ? stats.bitrate.toFixed(1) : '—'} unit="kbps" />
-        <StatItem
-          label="Loss"
-          value={stats ? lossRate.toFixed(1) : '—'}
-          unit="%"
-          warn={!!stats && lossRate > LOSS_WARN_PERCENT}
-          title={stats ? `${stats.packetsLost} packets lost since connecting` : undefined}
-        />
-        <StatItem label="Jitter" value={stats ? stats.jitter.toFixed(1) : '—'} unit="ms" />
-        <StatItem label={delayItem.label} value={delayItem.value} unit="ms" title={delayItem.title} />
+        {showingRelayLink ? (
+          <>
+            <StatItem label="Upload" value={relayLink!.uploadKbps.toFixed(1)} unit="kbps" title="Audio sent to the server for the stream relay" />
+            <StatItem label="Loss" value="n/a" title="The relay runs over TCP: nothing is lost, it stalls instead. Stalls show on the Relay line." />
+            <StatItem label="Jitter" value="n/a" title="Not measurable on the relay link; stalls show on the Relay line." />
+            <StatItem label="Server RTT" value={relayLink!.rttMs === null ? '—' : relayLink!.rttMs.toFixed(0)} unit="ms" title="Round trip from this console to the server" />
+          </>
+        ) : (
+          <>
+            <StatItem label="Speed" value={stats ? stats.bitrate.toFixed(1) : '—'} unit="kbps" />
+            <StatItem
+              label="Loss"
+              value={stats ? lossRate.toFixed(1) : '—'}
+              unit="%"
+              warn={!!stats && lossRate > LOSS_WARN_PERCENT}
+              title={stats ? `${stats.packetsLost} packets lost since connecting` : undefined}
+            />
+            <StatItem label="Jitter" value={stats ? stats.jitter.toFixed(1) : '—'} unit="ms" />
+            <StatItem label={delayItem.label} value={delayItem.value} unit="ms" title={delayItem.title} />
+          </>
+        )}
       </div>
+      {showingRelayLink && (
+        <p className="text-[10px] text-muted-foreground -mt-2">
+          No browser listeners connected; showing this console's link to the server.
+        </p>
+      )}
 
       {/* Connection states */}
       <div className="space-y-1.5 pt-2 border-t border-border/50">
