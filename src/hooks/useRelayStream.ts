@@ -5,6 +5,8 @@ export interface UseRelayStreamReturn {
   active: boolean;
   error: string | null;
   streamUrl: string | null;
+  /** Bytes handed to the WebSocket over the last second, as kbps (0 when inactive) */
+  uploadKbps: number;
   startRelay: (stream: MediaStream, roomId: string) => Promise<void>;
   stopRelay: () => void;
 }
@@ -25,12 +27,18 @@ export function useRelayStream(signaling: UseSignalingReturn): UseRelayStreamRet
   const [streamUrl, setStreamUrl] = useState<string | null>(null);
 
   const recorderRef = useRef<MediaRecorder | null>(null);
+  const [uploadKbps, setUploadKbps] = useState(0);
+  const bytesRef = useRef(0);
+  const rateTimerRef = useRef<ReturnType<typeof setInterval>>();
 
   const stopRelay = useCallback(() => {
     if (recorderRef.current && recorderRef.current.state !== 'inactive') {
       recorderRef.current.stop();
     }
     recorderRef.current = null;
+    if (rateTimerRef.current) { clearInterval(rateTimerRef.current); rateTimerRef.current = undefined; }
+    bytesRef.current = 0;
+    setUploadKbps(0);
     setActive(false);
     setStreamUrl(null);
   }, []);
@@ -89,7 +97,10 @@ export function useRelayStream(signaling: UseSignalingReturn): UseRelayStreamRet
         if (recorderRef.current !== recorder) return;
         if (e.data.size > 0) {
           e.data.arrayBuffer().then((buf) => {
-            if (recorderRef.current === recorder) sendBin(new Uint8Array(buf));
+            if (recorderRef.current === recorder) {
+              sendBin(new Uint8Array(buf));
+              bytesRef.current += buf.byteLength;
+            }
           });
         }
       };
@@ -100,6 +111,11 @@ export function useRelayStream(signaling: UseSignalingReturn): UseRelayStreamRet
       };
 
       recorder.start(250);
+      if (rateTimerRef.current) clearInterval(rateTimerRef.current);
+      rateTimerRef.current = setInterval(() => {
+        setUploadKbps((bytesRef.current * 8) / 1000);
+        bytesRef.current = 0;
+      }, 1000);
       setActive(true);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -108,5 +124,5 @@ export function useRelayStream(signaling: UseSignalingReturn): UseRelayStreamRet
     }
   }, [stopRelay, signaling]);
 
-  return { active, error, streamUrl, startRelay, stopRelay };
+  return { active, error, streamUrl, uploadKbps, startRelay, stopRelay };
 }

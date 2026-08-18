@@ -2112,6 +2112,13 @@ wss.on('connection', (ws, req) => {
         break;
       }
 
+      case 'ping': {
+        // Application-level round trip for the console's Stats panel (the
+        // protocol-level ping is invisible to page script)
+        try { ws.send(JSON.stringify({ type: 'pong', t: msg.t })); } catch { /* closing */ }
+        break;
+      }
+
       case 'relay-diag': {
         logger.info({ roomId: clientRoom?.slice(0, 8), frameCount: msg.frameCount, lastMp3Len: msg.lastMp3Len, ctxState: msg.ctxState }, 'Relay diag from client');
         break;
