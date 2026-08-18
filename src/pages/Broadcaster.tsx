@@ -474,6 +474,13 @@ const Broadcaster = () => {
     if (signaling.connected) addLog('Connected to server');
   }, [signaling.connected]);
 
+  useEffect(() => {
+    if (signaling.replaced) {
+      addLog('This broadcast was resumed from another window or device, so this one has been disconnected.', 'warn');
+      toast.error('Broadcast resumed elsewhere; this window is disconnected');
+    }
+  }, [signaling.replaced]);
+
   // Rejoin after a socket reconnect while on air. WebRTC listeners ride out
   // the blip on their own, but the server forgets who we are: without this
   // the stream relay (RadioDJ, VLC) goes silent for good and new listeners

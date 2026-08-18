@@ -878,7 +878,9 @@ export function useWebRTC(
   const joinRoomAsBroadcaster = useCallback(
     (roomIdToJoin: string) => {
       setRoomId(roomIdToJoin);
-      signaling.send({ type: 'join-room', roomId: roomIdToJoin, role: 'broadcaster' });
+      // resume lets the server hand us the slot even if our previous socket
+      // still looks open to it (dropped link, browser restart)
+      signaling.send({ type: 'join-room', roomId: roomIdToJoin, role: 'broadcaster', resume: true });
     },
     [signaling],
   );

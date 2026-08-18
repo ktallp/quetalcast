@@ -1751,6 +1751,20 @@ wss.on('connection', (ws, req) => {
           logger.warn({ ip, roomId }, 'Unauthenticated broadcaster join attempt');
           break;
         }
+        // A resume from the room's owner replaces a broadcaster socket that is
+        // still open. After a dropped link or a browser restart the old socket
+        // can look alive for up to two heartbeats; without this the owner would
+        // be told "Broadcast already in progress" and left waiting.
+        if (role === 'broadcaster' && msg.resume === true) {
+          const resumeRoom = rooms.rooms.get(roomId);
+          const stale = resumeRoom?.broadcaster;
+          if (stale && stale !== ws && resumeRoom.ownerUserId && sessionData?.userId === resumeRoom.ownerUserId) {
+            logger.info({ roomId: roomId.slice(0, 8) }, 'Owner resumed; replacing the previous broadcaster socket');
+            resumeRoom.broadcaster = null;
+            stopRoomTranscoder(resumeRoom);
+            try { stale.close(4002, 'Replaced by a newer session'); } catch { /* already closing */ }
+          }
+        }
         const result = rooms.join(roomId, role, ws);
         if (!result.ok) {
           ws.send(JSON.stringify({ type: 'error', message: result.error, code: result.code }));
@@ -2110,7 +2124,11 @@ wss.on('connection', (ws, req) => {
 
   ws.on('close', (code, reason) => {
     if (clientRoom && clientRole) {
-      if (clientRole === 'broadcaster') {
+      if (clientRole === 'broadcaster' && rooms.getBroadcaster(clientRoom) && rooms.getBroadcaster(clientRoom) !== ws) {
+        // This socket was replaced by the owner's newer session; the room
+        // lives on under the new socket, so there is nothing to tear down.
+        logger.info({ roomId: clientRoom.slice(0, 8), code }, 'Replaced broadcaster socket closed');
+      } else if (clientRole === 'broadcaster') {
         const dcRoom = rooms.rooms.get(clientRoom);
         if (dcRoom) {
           stopRoomTranscoder(dcRoom);
