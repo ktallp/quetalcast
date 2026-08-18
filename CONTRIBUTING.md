@@ -34,7 +34,7 @@ Thank you for your interest in contributing to QueTal Cast! Here are some guidel
 
 - **Frontend**: React + Vite + TypeScript. Located in `src/`
 - **Server**: Node.js + Express + WebSocket. Located in `server/`
-- **Package manager**: `pnpm` (this project uses pnpm)
+- **Package manager**: `pnpm` 9 or newer. The repo root and `server/` are separate pnpm projects with their own lockfiles; run `pnpm install` in each
 
 ## Submitting Changes
 

@@ -1,0 +1,12 @@
+# Frontend pnpm settings. This is not a monorepo: server/ is an independent
+# pnpm project with its own lockfile and its own pnpm-workspace.yaml, so it
+# is deliberately not listed here.
+packages:
+  - "."
+
+# pnpm 10+ refuses to run dependency build scripts unless approved, and pnpm 11
+# treats unapproved scripts as an install error. These are the only two
+# dependencies here that need to build (Vite / SWC native binaries).
+allowBuilds:
+  esbuild: true
+  "@swc/core": true

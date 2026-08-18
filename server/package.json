@@ -15,10 +15,5 @@
     "express-rate-limit": "^7.4.0",
     "pino": "^9.5.0",
     "ws": "^8.18.0"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "better-sqlite3"
-    ]
   }
 }

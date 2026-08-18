@@ -1,0 +1,10 @@
+# Server pnpm settings. Marks server/ as its own pnpm project so that
+# `cd server && pnpm install` never resolves to the frontend at the repo root
+# (pnpm 11 otherwise walks up and installs the wrong project).
+packages:
+  - "."
+
+# better-sqlite3 compiles a native module on install; approve it here rather
+# than in the package.json "pnpm" field, which pnpm 11 no longer reads.
+allowBuilds:
+  better-sqlite3: true

@@ -6,7 +6,7 @@ WORKDIR /app
 RUN corepack enable && corepack prepare pnpm@10 --activate
 
 # Install frontend dependencies and build
-COPY package.json pnpm-lock.yaml ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 COPY . .
 RUN pnpm run build
@@ -23,7 +23,7 @@ RUN apk add --no-cache chromaprint ffmpeg python3 make g++
 RUN corepack enable && corepack prepare pnpm@10 --activate
 
 # Install server dependencies only
-COPY server/package.json server/pnpm-lock.yaml ./server/
+COPY server/package.json server/pnpm-lock.yaml server/pnpm-workspace.yaml ./server/
 RUN cd server && pnpm install --frozen-lockfile --prod
 
 # Copy server code

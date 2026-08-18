@@ -81,7 +81,7 @@ System Audio ─► Gain ─► Pan ──────────────�
 ### Prerequisites
 
 - [Node.js](https://nodejs.org/) 18+
-- [pnpm](https://pnpm.io/)
+- [pnpm](https://pnpm.io/) 9 or newer (10 and 11 are what CI and Docker use)
 - [FFmpeg](https://ffmpeg.org/) — required for the built-in MP3 stream relay (installed automatically in the Docker image; install locally for dev)
 
 ### 1. Clone and install
@@ -96,6 +96,8 @@ pnpm install
 # Install server dependencies
 cd server && pnpm install && cd ..
 ```
+
+The frontend (repo root) and the server (`server/`) are two independent pnpm projects, each with its own lockfile and `pnpm-workspace.yaml`. Those workspace files also hold the build-script approvals (`allowBuilds`) that pnpm 10+ requires for `esbuild`, `@swc/core`, and `better-sqlite3`.
 
 ### 2. Configure environment
 
