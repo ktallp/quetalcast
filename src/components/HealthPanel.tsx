@@ -30,6 +30,8 @@ interface HealthPanelProps {
     backlogSeconds: number;
     state: 'idle' | 'streaming' | 'catching-up';
     relayKbps: number;
+    uplinkMs: number | null;
+    downlinkMs: number | null;
   } | null;
 }
 
@@ -157,7 +159,7 @@ export function HealthPanel({ role, stats, connectionState, iceConnectionState, 
               value={relayLink!.rttMs === null ? '—' : relayLink!.rttMs.toFixed(0)}
               unit="ms"
               warn={(relayLink!.rttMs ?? 0) > 2000}
-              title="Round trip from this console to the server. Climbing into seconds means the socket is not draining: audio is queuing in the browser."
+              title={`Round trip from this console to the server${relayLink!.uplinkMs !== null ? ` (up ${relayLink!.uplinkMs.toFixed(0)} ms, down ${(relayLink!.downlinkMs ?? 0).toFixed(0)} ms)` : ''}. Climbing into seconds means audio is queuing on the way to the server; the relay pauses past 3 s and resumes when it drains.`}
             />
           </>
         ) : (

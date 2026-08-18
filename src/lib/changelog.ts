@@ -18,6 +18,7 @@ export const CHANGELOG: ChangelogEntry[] = [
       'When the console\'s uplink could not carry the stream relay, audio queued in the browser without limit (Server RTT climbing into tens of seconds, the relay reported as stalled over and over, and every signaling message stuck behind it). The console now watches the socket\'s real backlog: past three seconds of queued audio it pauses the relay recorder, lets the socket drain, and restarts it (a notch lower in bitrate if it keeps happening), while the server fills the gap with silence and skips audio that arrives too late to stay live. The Upload tile now shows what actually left the computer, with the queue in its tooltip',
       'A silently dead signaling socket (tether hop, NAT timeout) is now detected by a heartbeat within fifteen seconds and reconnected, instead of the browser queueing into it for minutes',
       'A fresh relay recorder (backlog restart, bitrate change) is treated by the server as a resync: the transcoder restarts on the new WebM header instead of choking on it mid-stream',
+      'The relay backlog check now uses the heartbeat round trip as its main signal (the browser\'s own queue figure misses what sits in the OS socket buffers, which on a tethered phone was ten seconds of audio), pings every two seconds, and the Server RTT tooltip splits the round trip into up and down so the congested direction is visible',
     ],
     items: [],
   },
