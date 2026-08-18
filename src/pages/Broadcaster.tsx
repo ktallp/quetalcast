@@ -450,6 +450,32 @@ const Broadcaster = () => {
     if (signaling.connected) addLog('Connected to server');
   }, [signaling.connected]);
 
+  // Rejoin after a socket reconnect while on air. WebRTC listeners ride out
+  // the blip on their own, but the server forgets who we are: without this
+  // the stream relay (RadioDJ, VLC) goes silent for good and new listeners
+  // cannot join. Restarting the relay recorder gives FFmpeg a fresh WebM header.
+  const droppedOnAirRef = useRef(false);
+  useEffect(() => {
+    if (!signaling.connected) {
+      if (isOnAir && webrtc.roomId) {
+        droppedOnAirRef.current = true;
+        addLog('Lost connection to server. Reconnecting…', 'warn');
+      }
+      return;
+    }
+    if (!droppedOnAirRef.current) return;
+    droppedOnAirRef.current = false;
+    if (!isOnAir || !webrtc.roomId) return;
+    addLog('Reconnected to server. Rejoining room and restarting the stream relay.');
+    webrtc.joinRoomAsBroadcaster(webrtc.roomId);
+    relayStream.stopRelay();
+    if (mixer.mixedStream) {
+      relayStream.startRelay(mixer.mixedStream, webrtc.roomId).catch(() => {
+        // Non-fatal: the WebRTC broadcast still works without the relay
+      });
+    }
+  }, [signaling.connected]);
+
   // Handle auth errors and room creation errors from signaling
   useEffect(() => {
     const unsub = signaling.subscribe((msg) => {

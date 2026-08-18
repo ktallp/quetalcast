@@ -561,6 +561,11 @@ function pruneArchives() {
   }
 }
 
+/** True when a buffer starts a WebM/Matroska stream (EBML magic 1A 45 DF A3) */
+function isWebmHeader(buf) {
+  return buf.length >= 4 && buf[0] === 0x1a && buf[1] === 0x45 && buf[2] === 0xdf && buf[3] === 0xa3;
+}
+
 function startRoomTranscoder(room, roomId) {
   if (room.ffmpegProcess || !ffmpegPath) return;
 
@@ -1543,10 +1548,16 @@ wss.on('connection', (ws, req) => {
 
       if (room) {
         if (ffmpegPath) {
-          // FFmpeg transcoding: always restart transcoder on first chunk of a
-          // new connection so it receives a fresh WebM header for probing.
+          // FFmpeg transcoding: a transcoder is only started on a chunk that
+          // begins a WebM stream (EBML header), so a stray mid-stream chunk
+          // from a recorder that was being replaced cannot wedge FFmpeg on a
+          // failed probe. Chunks arriving with no transcoder are dropped.
           if (!room.ffmpegProcess) {
-            startRoomTranscoder(room, clientRoom);
+            if (isWebmHeader(data)) {
+              startRoomTranscoder(room, clientRoom);
+            } else {
+              logger.debug({ roomId: clientRoom.slice(0, 8) }, 'Relay chunk without WebM header and no transcoder; dropped');
+            }
           }
           if (room.ffmpegProcess?.stdin.writable) {
             try { room.ffmpegProcess.stdin.write(data); } catch { /* EPIPE handled by stdin error handler */ }

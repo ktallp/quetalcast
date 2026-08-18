@@ -83,9 +83,13 @@ export function useRelayStream(signaling: UseSignalingReturn): UseRelayStreamRet
       const sendBin = signaling.sendBinary;
 
       recorder.ondataavailable = (e: BlobEvent) => {
+        // A stopped recorder still flushes a final chunk; a header-less
+        // chunk from an old recorder must never reach the server ahead of
+        // the new recorder's WebM header.
+        if (recorderRef.current !== recorder) return;
         if (e.data.size > 0) {
           e.data.arrayBuffer().then((buf) => {
-            sendBin(new Uint8Array(buf));
+            if (recorderRef.current === recorder) sendBin(new Uint8Array(buf));
           });
         }
       };
