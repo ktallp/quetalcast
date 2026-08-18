@@ -15,7 +15,7 @@ export const WS_CLOSE_HEARTBEAT = 4000;
 // browser will keep queueing into it for minutes. The heartbeat notices
 // within HEARTBEAT_TIMEOUT_MS and reconnects; the app-level round trip it
 // yields is also what the Stats panel shows as Server RTT.
-const HEARTBEAT_INTERVAL_MS = 5000;
+const HEARTBEAT_INTERVAL_MS = 2000;
 const HEARTBEAT_TIMEOUT_MS = 15000;
 
 export interface UseSignalingReturn {
@@ -24,6 +24,14 @@ export interface UseSignalingReturn {
   replaced: boolean;
   /** Application-level round trip to the server, ms (null until measured) */
   rtt: number | null;
+  /**
+   * Split of the round trip into console-to-server and server-to-console, ms.
+   * Estimated against the clock offset seen on the fastest ping so far, so
+   * it is only meaningful relative to that best sample; it exists to show
+   * which direction is congested when rtt climbs.
+   */
+  uplinkMs: number | null;
+  downlinkMs: number | null;
   /** Bytes queued in the socket that have not left the browser yet */
   getBufferedAmount: () => number;
   send: (msg: SignalingMessage) => void;
@@ -40,6 +48,10 @@ export function useSignaling(url: string): UseSignalingReturn {
   const [connected, setConnected] = useState(false);
   const [replaced, setReplaced] = useState(false);
   const [rtt, setRtt] = useState<number | null>(null);
+  const [uplinkMs, setUplinkMs] = useState<number | null>(null);
+  const [downlinkMs, setDownlinkMs] = useState<number | null>(null);
+  /** Best (lowest-rtt) estimate of server clock minus our clock */
+  const clockOffsetRef = useRef<{ offset: number; rtt: number } | null>(null);
   const [lastMessage, setLastMessage] = useState<SignalingMessage | null>(null);
   const heartbeatTimerRef = useRef<ReturnType<typeof setInterval>>();
   const lastPongAtRef = useRef(0);
@@ -70,6 +82,9 @@ export function useSignaling(url: string): UseSignalingReturn {
         setConnected(true);
         reconnectDelayRef.current = 1000; // reset backoff on success
         setRtt(null);
+        setUplinkMs(null);
+        setDownlinkMs(null);
+        clockOffsetRef.current = null;
         lastPongAtRef.current = Date.now();
         stopHeartbeat();
         heartbeatTimerRef.current = setInterval(() => {
@@ -115,8 +130,22 @@ export function useSignaling(url: string): UseSignalingReturn {
         try {
           const msg = JSON.parse(event.data) as SignalingMessage;
           if (msg.type === 'pong') {
-            lastPongAtRef.current = Date.now();
-            if (typeof msg.t === 'number') setRtt(Math.max(0, Date.now() - msg.t));
+            const now = Date.now();
+            lastPongAtRef.current = now;
+            if (typeof msg.t === 'number') {
+              const sample = Math.max(0, now - msg.t);
+              setRtt(sample);
+              if (typeof msg.s === 'number') {
+                // offset = server clock - our clock, best estimated on the fastest ping
+                const offset = msg.s - (msg.t + sample / 2);
+                const best = clockOffsetRef.current;
+                if (!best || sample < best.rtt) clockOffsetRef.current = { offset, rtt: sample };
+                const ref = clockOffsetRef.current!;
+                const up = Math.max(0, Math.min(sample, msg.s - msg.t - ref.offset));
+                setUplinkMs(up);
+                setDownlinkMs(Math.max(0, sample - up));
+              }
+            }
           }
           setLastMessage(msg);
           handlersRef.current.forEach((h) => h(msg));
@@ -168,5 +197,5 @@ export function useSignaling(url: string): UseSignalingReturn {
     };
   }, []);
 
-  return { connected, replaced, rtt, getBufferedAmount, send, sendBinary, lastMessage, subscribe, connect, disconnect };
+  return { connected, replaced, rtt, uplinkMs, downlinkMs, getBufferedAmount, send, sendBinary, lastMessage, subscribe, connect, disconnect };
 }

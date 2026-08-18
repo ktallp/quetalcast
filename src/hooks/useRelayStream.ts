@@ -35,6 +35,14 @@ const RELAY_BITRATES_KBPS = [128, 96, 64, 48];
 const BACKLOG_PAUSE_SECONDS = 3;
 /** Resume once the queue is down to this */
 const BACKLOG_RESUME_SECONDS = 0.5;
+/**
+ * bufferedAmount only counts what the browser has not yet handed to the
+ * network layer; the OS socket buffers below it can hold many seconds of
+ * relay audio without it showing. The heartbeat round trip sees all of it
+ * (the ping waits behind every queued byte), so it is the primary signal.
+ */
+const RTT_PAUSE_MS = 3000;
+const RTT_RESUME_MS = 1000;
 /** Two pauses within this window step the bitrate down a notch */
 const STEP_DOWN_WINDOW_MS = 120_000;
 /** This long without a pause steps the bitrate back up a notch */
@@ -137,7 +145,9 @@ export function useRelayStream(signaling: UseSignalingReturn): UseRelayStreamRet
     const now = Date.now();
     const buffered = signaling.getBufferedAmount();
     const bytesPerSecond = (RELAY_BITRATES_KBPS[bitrateIdxRef.current] * 1000) / 8;
-    const backlog = buffered / bytesPerSecond;
+    // Visible queue plus what the round trip says is queued below it
+    const rttSeconds = signaling.rtt === null ? 0 : signaling.rtt / 1000;
+    const backlog = Math.max(buffered / bytesPerSecond, rttSeconds);
     setBacklogSeconds(backlog);
 
     // Drained rate = handed to the socket minus growth of the queue
@@ -153,7 +163,8 @@ export function useRelayStream(signaling: UseSignalingReturn): UseRelayStreamRet
     }
 
     if (pausedAtRef.current === null) {
-      if (backlog > BACKLOG_PAUSE_SECONDS && recorderRef.current) {
+      const congested = buffered / bytesPerSecond > BACKLOG_PAUSE_SECONDS || (signaling.rtt !== null && signaling.rtt > RTT_PAUSE_MS);
+      if (congested && recorderRef.current) {
         // The socket is not keeping up. Stop producing; the server fills
         // the gap with silence and drops whatever of this backlog arrives stale.
         pausedAtRef.current = now;
@@ -185,8 +196,10 @@ export function useRelayStream(signaling: UseSignalingReturn): UseRelayStreamRet
       return;
     }
 
-    // Paused: wait for the queue to drain, then start a fresh recorder
-    if (backlog <= BACKLOG_RESUME_SECONDS && signaling.connected) {
+    // Paused: wait for the queue to drain (visible queue empty and the round
+    // trip back to normal), then start a fresh recorder
+    const drained = buffered / bytesPerSecond <= BACKLOG_RESUME_SECONDS && (signaling.rtt === null || signaling.rtt < RTT_RESUME_MS);
+    if (drained && signaling.connected) {
       const pausedFor = (now - pausedAtRef.current) / 1000;
       pausedAtRef.current = null;
       dbg(`[Relay] Socket drained after ${pausedFor.toFixed(1)}s; restarting relay audio`);

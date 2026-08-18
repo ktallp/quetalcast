@@ -1790,6 +1790,8 @@ const Broadcaster = () => {
                           backlogSeconds: relayStream.backlogSeconds,
                           state: relayStream.uploadState,
                           relayKbps: relayStream.relayKbps,
+                          uplinkMs: signaling.uplinkMs,
+                          downlinkMs: signaling.downlinkMs,
                         } : null}
                       />
                     </div>

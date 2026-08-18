@@ -2126,7 +2126,7 @@ wss.on('connection', (ws, req) => {
       case 'ping': {
         // Application-level round trip for the console's Stats panel (the
         // protocol-level ping is invisible to page script)
-        try { ws.send(JSON.stringify({ type: 'pong', t: msg.t })); } catch { /* closing */ }
+        try { ws.send(JSON.stringify({ type: 'pong', t: msg.t, s: Date.now() })); } catch { /* closing */ }
         break;
       }
 
