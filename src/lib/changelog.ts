@@ -13,6 +13,18 @@ export interface ChangelogEntry {
 export const CHANGELOG: ChangelogEntry[] = [
   {
     date: '2026-08-17',
+    version: '0.7.2',
+    items: [
+      'Stream relay keepalive: the MP3 output is now frame-aligned and paced, so a hiccup on the broadcaster\'s connection is filled with silence at the real-time rate instead of pausing the byte stream (which is what made RadioDJ drop it); players get the last four seconds on connect so their buffer starts full, and the silence keeps flowing through a browser restart or dropped link until the broadcaster resumes',
+      'The Stats panel has a Relay line (Feeding with player count, or Stalled with the duration) and the event log records relay stalls and resumes; the listener page shows an estimated mic-to-speaker Latency instead of a raw round trip, and the broadcaster\'s figure is labelled RTT',
+    ],
+    fixes: [
+      'A dropped signaling connection while on air silently killed the stream relay for the rest of the show and stopped new listeners from joining; the console now rejoins the room and restarts the relay when the socket comes back, and an owner\'s resume takes over even if the server still holds the previous session',
+      'The selected input device is restored after a browser restart: device enumeration no longer overwrites the saved choice with the first device, and the input is matched by name when the browser hands out new IDs. The log reminds you when system audio was connected last time',
+    ],
+  },
+  {
+    date: '2026-08-17',
     version: '0.7.1',
     items: [
       'Auto quality now adapts per listener through four tiers (510, 128, 64, 32 kbps) and switches on audio redundancy (RED) for the lower tiers, so bursty loss on cellular and tethered links is repaired instead of heard; a listener climbs back up once its link has been clean for a while, and one bad link no longer drags every listener down',

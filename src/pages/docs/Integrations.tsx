@@ -94,10 +94,17 @@ export default function DocsIntegrations() {
           traditional radio software).
         </p>
         <p className="mt-2">
-          If the broadcaster disconnects unexpectedly (browser crash, network issue), the server
-          automatically feeds silent MP3 frames for up to <strong>10 minutes</strong> so media
-          players stay connected. When the broadcaster returns and resumes, live audio replaces
-          the silence seamlessly.
+          The relay keeps its byte stream continuous. Players such as RadioDJ treat any pause in
+          the stream as the end of it, and a pause is exactly what a hiccup on the broadcaster's
+          connection produces (that path is TCP, so trouble never shows up as packet loss). If no
+          audio has arrived for three quarters of a second the server splices in silent MP3
+          frames at the real-time rate until it resumes, and a player that connects is handed the
+          last four seconds straight away so its buffer starts full. If the broadcaster
+          disconnects entirely (browser crash, restart, network drop), the silence continues for
+          up to <strong>10 minutes</strong> so media players stay connected; when the broadcaster
+          resumes, live audio replaces the silence without a reconnect. The console's Stats panel
+          shows a <strong>Relay</strong> line (Feeding, or Stalled with the duration) and logs each
+          stall and resume.
         </p>
         <p className="mt-2">
           The relay is hardened for long-running streams: individual listener failures are isolated

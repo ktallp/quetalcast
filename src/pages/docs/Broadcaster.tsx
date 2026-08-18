@@ -436,13 +436,19 @@ export default function DocsBroadcaster() {
           </li>
           <li>
             <strong>Broadcast recovery</strong>: if your browser crashes or your connection drops,
-            the server feeds silence to connected media players for up to 10 minutes. Reopen the
-            console and you'll be offered <strong>Resume Broadcast</strong>; your audio replaces
-            the silence and stream listeners never disconnect.
+            the server feeds silence to connected media players for up to 10 minutes. A brief
+            drop heals itself: the console rejoins the room and restarts the stream relay as
+            soon as it reconnects, so listeners in the browser never notice and media players
+            hear a short silence at most. After a browser restart, reopen the console and you'll
+            be offered <strong>Resume Broadcast</strong>; your audio replaces the silence and
+            stream listeners never disconnect, even if the server still had your old session open.
           </li>
           <li>
             <strong>Layout is saved</strong>: mixer settings, effects, pads, quality mode, and
-            your selected input device are stored locally and restored on reload.
+            your selected input device are stored locally and restored on reload, including
+            after a browser restart (the input is matched by name if the browser hands out new
+            device IDs). System audio cannot be reconnected without a click, so the log reminds
+            you when it was on last time.
           </li>
           <li>
             <strong>Logout is global</strong>: logging out signs you out everywhere, not just in
