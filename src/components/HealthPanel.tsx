@@ -8,6 +8,8 @@ export interface RelayHealth {
   gapMs: number;
   stalls: number;
   lastStallMs: number;
+  /** Total late audio dropped to keep players near live, ms */
+  droppedMs: number;
   listeners: number;
 }
 
@@ -21,7 +23,14 @@ interface HealthPanelProps {
   /** Broadcaster only; null while the relay is not running */
   relay?: RelayHealth | null;
   /** Broadcaster only: our own link to the server, shown when no browser listener is connected */
-  relayLink?: { uploadKbps: number; rttMs: number | null } | null;
+  relayLink?: {
+    uploadKbps: number;
+    rttMs: number | null;
+    /** Seconds of relay audio queued in the socket, not yet sent */
+    backlogSeconds: number;
+    state: 'idle' | 'streaming' | 'catching-up';
+    relayKbps: number;
+  } | null;
 }
 
 function StatItem({ label, value, unit, warn, title }: { label: string; value: string | number; unit?: string; warn?: boolean; title?: string }) {
@@ -134,10 +143,22 @@ export function HealthPanel({ role, stats, connectionState, iceConnectionState, 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         {showingRelayLink ? (
           <>
-            <StatItem label="Upload" value={relayLink!.uploadKbps.toFixed(1)} unit="kbps" title="Audio sent to the server for the stream relay" />
+            <StatItem
+              label="Upload"
+              value={relayLink!.uploadKbps.toFixed(1)}
+              unit="kbps"
+              warn={relayLink!.backlogSeconds > 1}
+              title={`Relay audio actually leaving this computer (target ${relayLink!.relayKbps} kbps). ${relayLink!.backlogSeconds.toFixed(1)} s queued in the socket.`}
+            />
             <StatItem label="Loss" value="n/a" title="The relay runs over TCP: nothing is lost, it stalls instead. Stalls show on the Relay line." />
             <StatItem label="Jitter" value="n/a" title="Not measurable on the relay link; stalls show on the Relay line." />
-            <StatItem label="Server RTT" value={relayLink!.rttMs === null ? '—' : relayLink!.rttMs.toFixed(0)} unit="ms" title="Round trip from this console to the server" />
+            <StatItem
+              label="Server RTT"
+              value={relayLink!.rttMs === null ? '—' : relayLink!.rttMs.toFixed(0)}
+              unit="ms"
+              warn={(relayLink!.rttMs ?? 0) > 2000}
+              title="Round trip from this console to the server. Climbing into seconds means the socket is not draining: audio is queuing in the browser."
+            />
           </>
         ) : (
           <>
@@ -156,7 +177,11 @@ export function HealthPanel({ role, stats, connectionState, iceConnectionState, 
       </div>
       {showingRelayLink && (
         <p className="text-[10px] text-muted-foreground -mt-2">
-          No browser listeners connected; showing this console's link to the server.
+          {relayLink!.state === 'catching-up'
+            ? `Relay upload paused: ${relayLink!.backlogSeconds.toFixed(1)} s still queued, waiting for the socket to drain.`
+            : relayLink!.backlogSeconds > 1
+              ? `No browser listeners connected; showing this console's link. ${relayLink!.backlogSeconds.toFixed(1)} s of relay audio queued.`
+              : "No browser listeners connected; showing this console's link to the server."}
         </p>
       )}
 

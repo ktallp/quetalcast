@@ -8,11 +8,24 @@ export interface SignalingMessage {
 
 /** Server close code: this session was replaced by a newer one from the same account */
 export const WS_CLOSE_REPLACED = 4002;
+/** Client close code: no pong within the deadline, the socket is treated as dead */
+export const WS_CLOSE_HEARTBEAT = 4000;
+
+// A socket can die silently (tether hop, NAT timeout, laptop lid) and the
+// browser will keep queueing into it for minutes. The heartbeat notices
+// within HEARTBEAT_TIMEOUT_MS and reconnects; the app-level round trip it
+// yields is also what the Stats panel shows as Server RTT.
+const HEARTBEAT_INTERVAL_MS = 5000;
+const HEARTBEAT_TIMEOUT_MS = 15000;
 
 export interface UseSignalingReturn {
   connected: boolean;
   /** The server closed this socket because the same user resumed the room elsewhere */
   replaced: boolean;
+  /** Application-level round trip to the server, ms (null until measured) */
+  rtt: number | null;
+  /** Bytes queued in the socket that have not left the browser yet */
+  getBufferedAmount: () => number;
   send: (msg: SignalingMessage) => void;
   sendBinary: (data: ArrayBuffer | Uint8Array) => void;
   lastMessage: SignalingMessage | null;
@@ -26,7 +39,14 @@ export function useSignaling(url: string): UseSignalingReturn {
   const handlersRef = useRef<Set<(msg: SignalingMessage) => void>>(new Set());
   const [connected, setConnected] = useState(false);
   const [replaced, setReplaced] = useState(false);
+  const [rtt, setRtt] = useState<number | null>(null);
   const [lastMessage, setLastMessage] = useState<SignalingMessage | null>(null);
+  const heartbeatTimerRef = useRef<ReturnType<typeof setInterval>>();
+  const lastPongAtRef = useRef(0);
+
+  const stopHeartbeat = () => {
+    if (heartbeatTimerRef.current) { clearInterval(heartbeatTimerRef.current); heartbeatTimerRef.current = undefined; }
+  };
 
   // Auto-reconnect state
   const shouldReconnectRef = useRef(false);
@@ -49,11 +69,26 @@ export function useSignaling(url: string): UseSignalingReturn {
         dbg('[WS] Connected');
         setConnected(true);
         reconnectDelayRef.current = 1000; // reset backoff on success
+        setRtt(null);
+        lastPongAtRef.current = Date.now();
+        stopHeartbeat();
+        heartbeatTimerRef.current = setInterval(() => {
+          if (ws.readyState !== WebSocket.OPEN) return;
+          if (Date.now() - lastPongAtRef.current > HEARTBEAT_TIMEOUT_MS) {
+            dbgWarn(`[WS] No pong for ${HEARTBEAT_TIMEOUT_MS}ms (${ws.bufferedAmount} bytes queued); closing as dead`);
+            stopHeartbeat();
+            try { ws.close(WS_CLOSE_HEARTBEAT, 'heartbeat timeout'); } catch { /* already closing */ }
+            return;
+          }
+          try { ws.send(JSON.stringify({ type: 'ping', t: Date.now() })); } catch { /* closing */ }
+        }, HEARTBEAT_INTERVAL_MS);
       };
 
       ws.onclose = (event) => {
         dbg(`[WS] Closed (code: ${event.code}, reason: ${event.reason || 'none'})`);
+        stopHeartbeat();
         setConnected(false);
+        setRtt(null);
         if (event.code === WS_CLOSE_REPLACED) {
           // Another session of ours took the room; reconnecting would only fight it
           shouldReconnectRef.current = false;
@@ -79,6 +114,10 @@ export function useSignaling(url: string): UseSignalingReturn {
       ws.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data) as SignalingMessage;
+          if (msg.type === 'pong') {
+            lastPongAtRef.current = Date.now();
+            if (typeof msg.t === 'number') setRtt(Math.max(0, Date.now() - msg.t));
+          }
           setLastMessage(msg);
           handlersRef.current.forEach((h) => h(msg));
         } catch {
@@ -92,6 +131,7 @@ export function useSignaling(url: string): UseSignalingReturn {
 
   const disconnect = useCallback(() => {
     shouldReconnectRef.current = false;
+    stopHeartbeat();
     if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
     wsRef.current?.close();
     wsRef.current = null;
@@ -103,6 +143,8 @@ export function useSignaling(url: string): UseSignalingReturn {
       wsRef.current.send(JSON.stringify(msg));
     }
   }, []);
+
+  const getBufferedAmount = useCallback(() => wsRef.current?.bufferedAmount ?? 0, []);
 
   const sendBinary = useCallback((data: ArrayBuffer | Uint8Array) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -120,10 +162,11 @@ export function useSignaling(url: string): UseSignalingReturn {
   useEffect(() => {
     return () => {
       shouldReconnectRef.current = false;
+      stopHeartbeat();
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       wsRef.current?.close();
     };
   }, []);
 
-  return { connected, replaced, send, sendBinary, lastMessage, subscribe, connect, disconnect };
+  return { connected, replaced, rtt, getBufferedAmount, send, sendBinary, lastMessage, subscribe, connect, disconnect };
 }

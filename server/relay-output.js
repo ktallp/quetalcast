@@ -115,6 +115,12 @@ export function splitFrames(buf) {
 export const GAP_MS = 750;      // no real frame for this long: start filling
 export const BURST_MS = 4000;   // backlog sent to a listener on connect
 export const STALL_MS = 1000;   // a gap this long counts as a stall in the health report
+// Real audio may run ahead of the wall clock by this much (chunks arrive in
+// quarter-second bursts, so some lead is normal). Anything further ahead is
+// audio that arrived late after a stall was already filled with silence;
+// forwarding it would push every player that far behind live, for good.
+// Live listeners lost that stretch anyway, so it is dropped.
+export const MAX_AHEAD_MS = 1000;
 
 export class RelayOutput {
   /**
@@ -145,6 +151,7 @@ export class RelayOutput {
     this.stalls = 0;
     this.totalFillMs = 0;
     this.lastStallMs = 0;
+    this.droppedMs = 0;
   }
 
   /** The broadcaster delivered a chunk (may not yield a whole frame yet) */
@@ -165,10 +172,25 @@ export class RelayOutput {
       this.lastStallMs = stallMs;
       if (stallMs >= STALL_MS) this.stalls++;
     }
-    for (const f of frames) this._remember(f);
-    this.emit(Buffer.concat(frames.map((f) => f.data)), false);
+    if (this.streamAt === null) this.streamAt = now;
+    // Late frames (behind the wall clock) go straight out: the player's buffer
+    // absorbs the catch-up. Frames that would run ahead of the clock by more
+    // than MAX_AHEAD_MS are stale audio from before a filled stall; drop them.
+    const keep = [];
+    for (const f of frames) {
+      if (this.streamAt + f.ms > now + MAX_AHEAD_MS) {
+        this.droppedMs += f.ms;
+        continue;
+      }
+      this.streamAt += f.ms;
+      keep.push(f);
+      this._remember(f);
+    }
+    // Never leave the stream position behind the clock after real audio:
+    // the gap check should measure silence from the last real frame
+    if (this.streamAt < now) this.streamAt = now;
+    if (keep.length) this.emit(Buffer.concat(keep.map((f) => f.data)), false);
     this.lastRealAt = now;
-    this.streamAt = now;
   }
 
   /**
@@ -212,6 +234,7 @@ export class RelayOutput {
       stalls: this.stalls,
       lastStallMs: this.lastStallMs,
       totalFillMs: Math.round(this.totalFillMs),
+      droppedMs: Math.round(this.droppedMs),
       burstMs: Math.round(this.ringMs),
     };
   }
