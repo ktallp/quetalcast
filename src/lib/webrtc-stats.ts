@@ -1,19 +1,62 @@
 export interface WebRTCStats {
+  /** Payload bitrate over the last poll interval, kbps */
   bitrate: number;
+  /** Cumulative packets lost since the connection started */
   packetsLost: number;
+  /** Packet loss over the recent window (see LOSS_WINDOW_MS), percent 0-100 */
+  lossRate: number;
+  /** Inter-arrival jitter, ms */
   jitter: number;
+  /** Round-trip time, ms (0 when unknown) */
   rtt: number;
   audioLevel: number;
   timestamp: number;
 }
 
-interface PrevStats {
-  bytesReceived?: number;
-  bytesSent?: number;
-  timestamp?: number;
+/**
+ * How far back the loss rate looks. RTCP receiver reports for audio only
+ * arrive every few seconds, so a per-poll delta would read 0 most of the
+ * time and then spike; a rolling window gives a steady, comparable figure
+ * on both ends of the call.
+ */
+export const LOSS_WINDOW_MS = 10_000;
+
+interface Sample {
+  timestamp: number;
+  lost: number;
+  /** packets sent (broadcaster) or received + lost (receiver) */
+  total: number;
 }
 
-let prevStats: PrevStats = {};
+interface PcHistory {
+  bytes?: number;
+  timestamp?: number;
+  samples: Sample[];
+}
+
+/** Stats history keyed by peer connection so several PCs can be polled independently */
+let histories = new WeakMap<RTCPeerConnection, PcHistory>();
+
+function historyFor(pc: RTCPeerConnection): PcHistory {
+  let h = histories.get(pc);
+  if (!h) {
+    h = { samples: [] };
+    histories.set(pc, h);
+  }
+  return h;
+}
+
+/** Percent of packets lost between the oldest sample inside the window and now */
+export function windowedLossRate(samples: Sample[], now: number, windowMs = LOSS_WINDOW_MS): number {
+  while (samples.length > 1 && now - samples[0].timestamp > windowMs) samples.shift();
+  if (samples.length < 2) return 0;
+  const first = samples[0];
+  const last = samples[samples.length - 1];
+  const dLost = Math.max(0, last.lost - first.lost);
+  const dTotal = Math.max(0, last.total - first.total);
+  if (dTotal <= 0) return 0;
+  return Math.min(100, (dLost / dTotal) * 100);
+}
 
 export async function parseStats(
   pc: RTCPeerConnection,
@@ -23,55 +66,84 @@ export async function parseStats(
   const result: WebRTCStats = {
     bitrate: 0,
     packetsLost: 0,
+    lossRate: 0,
     jitter: 0,
     rtt: 0,
     audioLevel: 0,
     timestamp: Date.now(),
   };
 
+  const history = historyFor(pc);
+  let bytes: number | undefined;
+  let bytesTimestamp: number | undefined;
+  let lost = 0;
+  let received = 0;
+  let sent = 0;
+  let sampleTimestamp = 0;
+  let hasRemoteReport = false;
+  let candidatePairRtt = 0;
+
   stats.forEach((report) => {
     if (role === 'receiver' && report.type === 'inbound-rtp' && report.kind === 'audio') {
-      result.packetsLost = report.packetsLost ?? 0;
+      lost = report.packetsLost ?? 0;
+      received = report.packetsReceived ?? 0;
       result.jitter = (report.jitter ?? 0) * 1000; // convert to ms
-
-      const bytes = report.bytesReceived ?? 0;
-      const now = report.timestamp;
-      if (prevStats.bytesReceived !== undefined && prevStats.timestamp !== undefined) {
-        const dt = (now - prevStats.timestamp) / 1000;
-        if (dt > 0) {
-          result.bitrate = ((bytes - prevStats.bytesReceived) * 8) / dt / 1000; // kbps
-        }
-      }
-      prevStats.bytesReceived = bytes;
-      prevStats.timestamp = now;
+      bytes = report.bytesReceived ?? 0;
+      bytesTimestamp = report.timestamp;
+      sampleTimestamp = report.timestamp;
     }
 
     if (role === 'broadcaster' && report.type === 'outbound-rtp' && report.kind === 'audio') {
-      const bytes = report.bytesSent ?? 0;
-      const now = report.timestamp;
-      if (prevStats.bytesSent !== undefined && prevStats.timestamp !== undefined) {
-        const dt = (now - prevStats.timestamp) / 1000;
-        if (dt > 0) {
-          result.bitrate = ((bytes - prevStats.bytesSent) * 8) / dt / 1000;
-        }
-      }
-      prevStats.bytesSent = bytes;
-      prevStats.timestamp = now;
+      sent = report.packetsSent ?? 0;
+      bytes = report.bytesSent ?? 0;
+      bytesTimestamp = report.timestamp;
+      sampleTimestamp = report.timestamp;
     }
 
-    if (report.type === 'remote-inbound-rtp' && report.kind === 'audio') {
+    if (role === 'broadcaster' && report.type === 'remote-inbound-rtp' && report.kind === 'audio') {
+      hasRemoteReport = true;
       result.rtt = (report.roundTripTime ?? 0) * 1000;
-      result.packetsLost = report.packetsLost ?? result.packetsLost;
+      result.jitter = (report.jitter ?? 0) * 1000;
+      lost = report.packetsLost ?? 0;
     }
 
     if (report.type === 'media-source' && report.kind === 'audio') {
       result.audioLevel = report.audioLevel ?? 0;
     }
+
+    // ICE round trip: the only RTT a receive-only peer has (it sends no RTP,
+    // so it never gets a remote-inbound-rtp report)
+    if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.currentRoundTripTime !== undefined) {
+      if (report.nominated || report.selected || candidatePairRtt === 0) {
+        candidatePairRtt = report.currentRoundTripTime * 1000;
+      }
+    }
   });
+
+  if (result.rtt === 0 && candidatePairRtt > 0) result.rtt = candidatePairRtt;
+
+  // Bitrate over the last poll interval
+  if (bytes !== undefined && bytesTimestamp !== undefined) {
+    if (history.bytes !== undefined && history.timestamp !== undefined) {
+      const dt = (bytesTimestamp - history.timestamp) / 1000;
+      if (dt > 0) result.bitrate = ((bytes - history.bytes) * 8) / dt / 1000; // kbps
+    }
+    history.bytes = bytes;
+    history.timestamp = bytesTimestamp;
+  }
+
+  // Loss over the rolling window. Broadcaster loss comes from the receiver's
+  // RTCP reports, so only sample once at least one has arrived.
+  result.packetsLost = Math.max(0, lost);
+  const total = role === 'receiver' ? received + Math.max(0, lost) : sent;
+  if (sampleTimestamp > 0 && (role === 'receiver' || hasRemoteReport)) {
+    history.samples.push({ timestamp: sampleTimestamp, lost: Math.max(0, lost), total });
+    result.lossRate = windowedLossRate(history.samples, sampleTimestamp);
+  }
 
   return result;
 }
 
 export function resetStats(): void {
-  prevStats = {};
+  histories = new WeakMap();
 }

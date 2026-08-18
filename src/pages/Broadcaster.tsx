@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { getSession, isAuthenticated, logout, verifySession } from '@/lib/auth';
 import { useSignaling } from '@/hooks/useSignaling';
-import { useWebRTC, type ConnectionStatus, type AudioQuality } from '@/hooks/useWebRTC';
+import { useWebRTC, type ConnectionStatus, type AudioQuality, type EffectiveQuality } from '@/hooks/useWebRTC';
 import { useAudioAnalyser } from '@/hooks/useAudioAnalyser';
 import { StatusBar } from '@/components/StatusBar';
 import { LevelMeter } from '@/components/LevelMeter';
@@ -72,6 +72,13 @@ const BROADCASTER_LAYOUT_STORAGE_KEY = 'quetalcast:broadcaster-layout:v1';
 const ACTIVE_BROADCAST_KEY = 'quetalcast:active-broadcast';
 const SETLIST_STORAGE_KEY = 'quetalcast:setlist:v1';
 const API_BASE = import.meta.env.VITE_API_URL || '';
+/** Wording for the auto-quality tiers reported by useWebRTC */
+const AUTO_TIER_LABELS: Record<EffectiveQuality, string> = {
+  high: 'high quality',
+  medium: '128 kbps with redundancy',
+  reduced: '64 kbps with redundancy',
+  low: '32 kbps with redundancy',
+};
 
 function readStoredSetlist(): SetlistItem[] {
   try {
@@ -860,7 +867,7 @@ const Broadcaster = () => {
     webrtc.setAudioQuality(q);
     const labels: Record<AudioQuality, string> = {
       high: 'High quality (510 kbps stereo)',
-      auto: 'Auto quality: adapts to connection health',
+      auto: 'Auto quality: adapts per listener, adds redundancy on lossy links',
       low: 'Low bandwidth (32 kbps mono)',
     };
     addLog(labels[q]);
@@ -1489,9 +1496,11 @@ const Broadcaster = () => {
                           {qualityMode === 'high' && '510 kbps stereo: pristine broadcast quality'}
                           {qualityMode === 'auto' && (
                             <>
-                              Adapts to connection health, currently{' '}
+                              Adapts per listener, currently{' '}
                               <span className={webrtc.effectiveQuality === 'high' ? 'text-primary' : 'text-yellow-500'}>
-                                {webrtc.effectiveQuality === 'high' ? 'high quality' : 'low bandwidth'}
+                                {webrtc.effectiveQuality === 'high'
+                                  ? 'high quality for everyone'
+                                  : `${AUTO_TIER_LABELS[webrtc.effectiveQuality]} for ${webrtc.adaptedListeners} listener${webrtc.adaptedListeners === 1 ? '' : 's'}`}
                               </span>
                             </>
                           )}

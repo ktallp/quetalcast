@@ -106,8 +106,13 @@ export default function DocsBroadcaster() {
             video is discarded immediately and nothing on screen is recorded.
           </li>
           <li>
-            <strong>Audio Quality</strong>: High (510 kbps stereo), Auto (adapts to connection
-            health), or Low (32 kbps mono for slow connections).
+            <strong>Audio Quality</strong>: High (510 kbps stereo), Auto, or Low (32 kbps mono
+            for slow connections). Auto watches each listener separately and steps that listener
+            down through 128, 64, and 32 kbps when their link shows packet loss, jitter, or high
+            delay, switching on packet redundancy at the same time so bursty loss (typical on
+            cellular and tethered connections) is repaired rather than heard. A listener climbs
+            back up once their link has been clean for a while; other listeners are unaffected.
+            The Stats panel shows the listener having the hardest time.
           </li>
         </ul>
       </section>

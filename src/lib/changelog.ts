@@ -12,6 +12,19 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    date: '2026-08-17',
+    version: '0.7.1',
+    items: [
+      'Auto quality now adapts per listener through four tiers (510, 128, 64, 32 kbps) and switches on audio redundancy (RED) for the lower tiers, so bursty loss on cellular and tethered links is repaired instead of heard; a listener climbs back up once its link has been clean for a while, and one bad link no longer drags every listener down',
+      'Listeners deepen their playback buffer while a link is dropping or jittery and shrink it again once it settles',
+    ],
+    fixes: [
+      'Auto quality compared the cumulative lost-packet counter against a five-packet limit, so it dropped to 32 kbps mono a minute into almost any session and could never come back; it now uses the loss rate over the last ten seconds',
+      'The Stats panel shows loss as a percentage over the last ten seconds instead of the all-time packet count (the count is in the tooltip), the Stream line reads "Lossy" instead of "Good" when loss is heavy, and the receiver Delay figure is no longer stuck at 0 ms',
+      'The receiver echoes the Opus parameters (stereo, bitrate, FEC) into its answer, which is where the encoder actually reads them from',
+    ],
+  },
+  {
     date: '2026-07-19',
     version: '0.7.0',
     items: [

@@ -82,7 +82,7 @@ export default function DocsOverview() {
         <li>
           <strong>WebRTC</strong>
           {': '}
-          Peer-to-peer audio streaming with Opus codec (up to 510 kbps stereo), adaptive quality,
+          Peer-to-peer audio streaming with Opus codec (up to 510 kbps stereo), per-listener adaptive quality with packet redundancy on lossy links,
           and automatic reconnection
         </li>
         <li>
