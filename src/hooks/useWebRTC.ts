@@ -5,7 +5,7 @@ import { dbg, dbgWarn } from '@/lib/debug';
 
 export type ConnectionStatus = 'idle' | 'connecting' | 'on-air' | 'receiving' | 'disconnected' | 'error';
 export type AudioQuality = 'high' | 'low' | 'auto';
-type EffectiveQuality = 'high' | 'low';
+export type EffectiveQuality = 'high' | 'medium' | 'reduced' | 'low';
 
 export interface UseWebRTCReturn {
   status: ConnectionStatus;
@@ -23,8 +23,10 @@ export interface UseWebRTCReturn {
   createRoom: (customId?: string, streamTitle?: string, streamDescription?: string) => void;
   roomId: string | null;
   setAudioQuality: (quality: AudioQuality) => void;
-  /** The actual quality level in use (meaningful when mode is 'auto') */
+  /** Lowest quality tier currently in use across listeners (meaningful when mode is 'auto') */
   effectiveQuality: EffectiveQuality;
+  /** Number of listeners auto mode has moved off the starting tier */
+  adaptedListeners: number;
   /** Current reconnect attempt (0 = not reconnecting) */
   reconnectAttempt: number;
   /** Max reconnect attempts before giving up */
@@ -67,14 +69,15 @@ async function fetchIceConfig(): Promise<RTCConfiguration> {
 // Opus SDP parameters for pristine vs bandwidth-saving audio
 // ---------------------------------------------------------------------------
 
-/** Pristine: 510 kbps stereo Opus, CBR, no DTX, no FEC */
+/** Pristine: 510 kbps stereo Opus, CBR, no DTX. In-band FEC is requested too;
+ *  it costs nothing at CELT rates and protects the lower auto tiers. */
 const HQ_OPUS_PARAMS: Record<string, number> = {
   maxaveragebitrate: 510000,
   stereo: 1,
   'sprop-stereo': 1,
   maxplaybackrate: 48000,
   usedtx: 0,
-  useinbandfec: 0,
+  useinbandfec: 1,
   cbr: 1,
 };
 
@@ -89,20 +92,38 @@ const LQ_OPUS_PARAMS: Record<string, number> = {
   cbr: 0,
 };
 
-/** Rewrite the Opus fmtp line in an SDP string to inject our codec params */
-function mungeOpusSdp(sdp: string, quality: EffectiveQuality): string {
-  const params = quality === 'high' ? HQ_OPUS_PARAMS : LQ_OPUS_PARAMS;
-  const lines = sdp.split('\r\n');
+/** Opus fmtp keys a receiver copies from the offer into its answer */
+const ECHOED_OPUS_PARAMS = ['maxaveragebitrate', 'stereo', 'sprop-stereo', 'maxplaybackrate', 'usedtx', 'useinbandfec', 'cbr'] as const;
 
-  // Find the Opus payload type number
-  let opusPT: string | null = null;
+/** Payload type of the Opus codec in an SDP, if present */
+function findOpusPayloadType(lines: string[]): string | null {
   for (const line of lines) {
     const match = line.match(/^a=rtpmap:(\d+) opus\/48000/);
-    if (match) {
-      opusPT = match[1];
-      break;
-    }
+    if (match) return match[1];
   }
+  return null;
+}
+
+/** Read the Opus fmtp parameters out of an SDP string */
+export function extractOpusFmtp(sdp: string): Record<string, string> {
+  const lines = sdp.split('\r\n');
+  const opusPT = findOpusPayloadType(lines);
+  const params: Record<string, string> = {};
+  if (!opusPT) return params;
+  const fmtpPrefix = `a=fmtp:${opusPT}`;
+  const line = lines.find((l) => l.startsWith(fmtpPrefix));
+  if (!line) return params;
+  line.slice(fmtpPrefix.length + 1).split(';').forEach((p) => {
+    const [k, ...v] = p.trim().split('=');
+    if (k) params[k] = v.join('=');
+  });
+  return params;
+}
+
+/** Rewrite the Opus fmtp line in an SDP string to inject codec params */
+export function mungeOpusSdpParams(sdp: string, params: Record<string, string | number>): string {
+  const lines = sdp.split('\r\n');
+  const opusPT = findOpusPayloadType(lines);
   if (!opusPT) return sdp;
 
   const fmtpPrefix = `a=fmtp:${opusPT}`;
@@ -136,37 +157,166 @@ function mungeOpusSdp(sdp: string, quality: EffectiveQuality): string {
   return result.join('\r\n');
 }
 
-/** Apply maxBitrate on all audio senders of a peer connection */
-async function applyBitrateToSenders(pc: RTCPeerConnection, quality: EffectiveQuality) {
-  const maxBitrate = quality === 'high' ? 510000 : 32000;
+/** Rewrite the Opus fmtp line for a quality mode */
+function mungeOpusSdp(sdp: string, quality: 'high' | 'low'): string {
+  return mungeOpusSdpParams(sdp, quality === 'high' ? HQ_OPUS_PARAMS : LQ_OPUS_PARAMS);
+}
+
+// ---------------------------------------------------------------------------
+// Quality tiers
+// ---------------------------------------------------------------------------
+// Stereo/mono, DTX and playback rate are fixed when the offer is negotiated;
+// what can move at runtime without renegotiating is the target bitrate and,
+// where the browser supports RTCRtpEncodingParameters.codec, the send codec.
+// Auto mode steps each listener down this ladder on loss/jitter/RTT and back
+// up when the link has been clean for a while. Tiers below "high" also switch
+// that listener to audio RED (one redundant copy of the previous packet in
+// every packet), which is what actually recovers the bursty loss seen on
+// cellular and tethered links; lowering the bitrate alone does not.
+
+interface QualityTier {
+  name: EffectiveQuality;
+  bitrate: number;
+  /** Send audio/red for this tier when auto mode chose it */
+  red: boolean;
+  label: string;
+}
+
+const QUALITY_TIERS: readonly QualityTier[] = [
+  { name: 'high', bitrate: 510000, red: false, label: '510 kbps' },
+  { name: 'medium', bitrate: 128000, red: true, label: '128 kbps + redundancy' },
+  { name: 'reduced', bitrate: 64000, red: true, label: '64 kbps + redundancy' },
+  { name: 'low', bitrate: 32000, red: true, label: '32 kbps + redundancy' },
+];
+const TIER_HIGH = 0;
+const TIER_LOW = QUALITY_TIERS.length - 1;
+
+/** Apply a tier (bitrate, and RED on/off) to the audio senders of a peer connection */
+async function applyTierToSenders(pc: RTCPeerConnection, tier: QualityTier, useRed: boolean) {
   for (const sender of pc.getSenders()) {
-    if (sender.track?.kind === 'audio') {
+    if (sender.track?.kind !== 'audio') continue;
+    try {
+      const params = sender.getParameters();
+      if (!params.encodings || params.encodings.length === 0) {
+        params.encodings = [{}];
+      }
+      params.encodings[0].maxBitrate = tier.bitrate;
+
+      // Pick the send codec: RED when asked for and negotiated, otherwise Opus.
+      // Older browsers ignore or reject `codec`; if so, retry with bitrate only.
+      const codecs = params.codecs ?? [];
+      const wanted = useRed
+        ? codecs.find((c) => c.mimeType.toLowerCase() === 'audio/red')
+        : codecs.find((c) => c.mimeType.toLowerCase() === 'audio/opus');
+      const encoding = params.encodings[0] as RTCRtpEncodingParameters & { codec?: RTCRtpCodec };
+      if (wanted) {
+        encoding.codec = { mimeType: wanted.mimeType, clockRate: wanted.clockRate, channels: wanted.channels, sdpFmtpLine: wanted.sdpFmtpLine };
+      } else if (useRed) {
+        dbg('[RTC:B] audio/red not negotiated with this listener; bitrate only');
+      }
       try {
-        const params = sender.getParameters();
-        if (!params.encodings || params.encodings.length === 0) {
-          params.encodings = [{}];
-        }
-        params.encodings[0].maxBitrate = maxBitrate;
         await sender.setParameters(params);
       } catch (e) {
-        console.warn('Could not set sender bitrate:', e);
+        if (encoding.codec) {
+          dbgWarn('[RTC:B] setParameters with codec rejected, retrying without', e);
+          delete encoding.codec;
+          await sender.setParameters(params);
+        } else {
+          throw e;
+        }
       }
+    } catch (e) {
+      console.warn('Could not set sender parameters:', e);
     }
   }
 }
 
 // ---------------------------------------------------------------------------
-// Auto-adaptive quality thresholds
+// Auto-adaptive quality thresholds (per listener)
 // ---------------------------------------------------------------------------
-const AUTO_DOWNGRADE_RTT = 200;     // ms — downgrade if RTT exceeds this
-const AUTO_DOWNGRADE_LOSS = 5;      // packets — downgrade if loss exceeds this
-const AUTO_DOWNGRADE_JITTER = 50;   // ms — downgrade if jitter exceeds this
+// Loss is the rate over the stats window (see LOSS_WINDOW_MS), not the
+// cumulative counter, so a link that had one bad patch can recover.
+const AUTO_DOWN_LOSS = 3;          // % lost over the window: step down
+const AUTO_DOWN_LOSS_WITH_RED = 8; // % once RED is on (it hides isolated loss, so allow more)
+const AUTO_DOWN_JITTER = 50;       // ms
+const AUTO_DOWN_RTT = 300;         // ms
 
-const AUTO_UPGRADE_RTT = 100;       // ms — can upgrade if RTT below this
-const AUTO_UPGRADE_LOSS = 1;        // packets — can upgrade if loss below this
-const AUTO_UPGRADE_JITTER = 20;     // ms — can upgrade if jitter below this
+const AUTO_UP_LOSS = 0.5;          // % must be below this to step up
+const AUTO_UP_JITTER = 20;         // ms
+const AUTO_UP_RTT = 150;           // ms
 
-const AUTO_UPGRADE_STABLE_COUNT = 5; // consecutive good readings before upgrading
+const AUTO_STEP_COOLDOWN_MS = 10_000; // wait for the loss window to reflect the last change
+const AUTO_UP_STABLE_SECONDS = 15;    // consecutive clean readings before stepping up
+const AUTO_UP_MAX_STABLE_SECONDS = 120;
+const AUTO_FLAP_WINDOW_MS = 60_000;   // an up followed by a down within this doubles the next hold
+
+/** Tier a listener starts at for the chosen mode */
+function tierForMode(mode: AudioQuality): number {
+  return mode === 'low' ? TIER_LOW : TIER_HIGH;
+}
+
+export interface ListenerAdapt {
+  tier: number;
+  goodSeconds: number;
+  /** Clean seconds currently required before stepping up (grows on flapping) */
+  requiredGood: number;
+  lastChangeAt: number;
+  lastUpAt: number;
+}
+
+function newListenerAdapt(tier: number): ListenerAdapt {
+  return { tier, goodSeconds: 0, requiredGood: AUTO_UP_STABLE_SECONDS, lastChangeAt: 0, lastUpAt: 0 };
+}
+
+/**
+ * Decide the next tier for one listener from its latest stats.
+ * Pure so it can be unit tested; returns the (possibly unchanged) state.
+ */
+export function stepListenerTier(state: ListenerAdapt, s: { lossRate: number; jitter: number; rtt: number }, now: number): ListenerAdapt {
+  const next = { ...state };
+  const inCooldown = now - state.lastChangeAt < AUTO_STEP_COOLDOWN_MS;
+  const redOn = QUALITY_TIERS[state.tier].red;
+  const lossLimit = redOn ? AUTO_DOWN_LOSS_WITH_RED : AUTO_DOWN_LOSS;
+
+  const bad = s.lossRate > lossLimit || s.jitter > AUTO_DOWN_JITTER || s.rtt > AUTO_DOWN_RTT;
+  const good = s.lossRate < AUTO_UP_LOSS && s.jitter < AUTO_UP_JITTER && s.rtt < AUTO_UP_RTT;
+
+  if (bad) {
+    next.goodSeconds = 0;
+    if (!inCooldown && state.tier < TIER_LOW) {
+      next.tier = state.tier + 1;
+      next.lastChangeAt = now;
+      // Stepped up recently and it did not hold: demand a longer clean run next time
+      if (now - state.lastUpAt < AUTO_FLAP_WINDOW_MS) {
+        next.requiredGood = Math.min(AUTO_UP_MAX_STABLE_SECONDS, state.requiredGood * 2);
+      }
+    }
+    return next;
+  }
+
+  if (good && state.tier > TIER_HIGH) {
+    next.goodSeconds = state.goodSeconds + 1;
+    if (!inCooldown && next.goodSeconds >= state.requiredGood) {
+      next.tier = state.tier - 1;
+      next.goodSeconds = 0;
+      next.lastChangeAt = now;
+      next.lastUpAt = now;
+    }
+    return next;
+  }
+
+  if (!good) next.goodSeconds = 0;
+  return next;
+}
+
+// ---------------------------------------------------------------------------
+// Receiver jitter buffer
+// ---------------------------------------------------------------------------
+const RECEIVER_JITTER_BUFFER_MS = 150;       // baseline target, a touch above the browser default
+const RECEIVER_JITTER_BUFFER_LOSSY_MS = 400; // while the link is dropping or jittery
+const RECEIVER_BUFFER_ESCALATE_LOSS = 2;     // % over the stats window
+const RECEIVER_BUFFER_ESCALATE_JITTER = 30;  // ms
+const RECEIVER_BUFFER_RELAX_SECONDS = 30;    // clean seconds before going back to baseline
 
 // ---------------------------------------------------------------------------
 // Receiver auto-reconnect
@@ -216,9 +366,15 @@ export function useWebRTC(
 
   // Audio quality
   const audioQualityModeRef = useRef<AudioQuality>('auto');     // user's chosen mode
-  const effectiveQualityRef = useRef<EffectiveQuality>('high'); // what's actually in use
   const [effectiveQuality, setEffectiveQuality] = useState<EffectiveQuality>('high');
-  const stableCountRef = useRef(0); // consecutive good readings for upgrade hysteresis
+  const [adaptedListeners, setAdaptedListeners] = useState(0);
+  /** Per-listener adaptation state, keyed by receiverId (broadcaster only) */
+  const listenersRef = useRef<Map<string, ListenerAdapt>>(new Map());
+
+  // Receiver jitter buffer (see applyJitterBufferTarget)
+  const rtpReceiverRef = useRef<RTCRtpReceiver | null>(null);
+  const jitterTargetRef = useRef(0);
+  const jitterCleanSecondsRef = useRef(0);
 
   // Receiver reconnect state
   const [reconnectAttempt, setReconnectAttempt] = useState(0);
@@ -236,47 +392,85 @@ export function useWebRTC(
   const statsIntervalRef = useRef<ReturnType<typeof setInterval>>();
   const reportIntervalRef = useRef<ReturnType<typeof setInterval>>();
 
-  /** Apply a quality level to all existing broadcaster PCs */
-  const applyEffectiveQuality = useCallback((q: EffectiveQuality) => {
-    if (effectiveQualityRef.current === q) return;
-    effectiveQualityRef.current = q;
-    setEffectiveQuality(q);
-    for (const pc of pcsRef.current.values()) {
-      applyBitrateToSenders(pc, q);
+  /** Recompute the summary shown in the UI: worst tier in use, and how many listeners are adapted */
+  const refreshEffectiveQuality = useCallback(() => {
+    const base = tierForMode(audioQualityModeRef.current);
+    let worst = base;
+    let adapted = 0;
+    for (const l of listenersRef.current.values()) {
+      if (l.tier > worst) worst = l.tier;
+      if (l.tier !== base) adapted++;
+    }
+    setEffectiveQuality(QUALITY_TIERS[worst].name);
+    setAdaptedListeners(adapted);
+  }, []);
+
+  /** Push a listener's tier to its peer connection */
+  const applyListenerTier = useCallback((receiverId: string, tierIdx: number) => {
+    const pc = pcsRef.current.get(receiverId);
+    if (!pc) return;
+    const tier = QUALITY_TIERS[tierIdx];
+    // RED is an auto-mode tool; manual Low means "spend less", so no redundancy there
+    const useRed = audioQualityModeRef.current === 'auto' && tier.red;
+    applyTierToSenders(pc, tier, useRed);
+  }, []);
+
+  /** Auto-adaptive: evaluate one listener's stats and step its tier if needed */
+  const evaluateAutoQuality = useCallback((receiverId: string, s: WebRTCStats) => {
+    if (audioQualityModeRef.current !== 'auto') return;
+    const state = listenersRef.current.get(receiverId);
+    if (!state) return;
+    const next = stepListenerTier(state, s, Date.now());
+    listenersRef.current.set(receiverId, next);
+    if (next.tier !== state.tier) {
+      const dir = next.tier > state.tier ? 'down' : 'up';
+      dbg(`[RTC:B] Listener ${receiverId} stepping ${dir} to ${QUALITY_TIERS[next.tier].label} (loss ${s.lossRate.toFixed(1)}%, jitter ${s.jitter.toFixed(0)}ms, rtt ${s.rtt.toFixed(0)}ms)`);
+      applyListenerTier(receiverId, next.tier);
+      refreshEffectiveQuality();
+    }
+  }, [applyListenerTier, refreshEffectiveQuality]);
+
+  /**
+   * Receiver: ask the browser for a deeper jitter buffer than its low-latency
+   * default. Live radio can afford a bit more delay, and on lossy links the
+   * extra headroom turns gaps into smooth playback. Escalates while the link
+   * is bad and relaxes again after it has been clean for a while.
+   */
+  const applyJitterBufferTarget = useCallback((ms: number) => {
+    // jitterBufferTarget is the standard knob (Chrome 114+, Firefox, Safari);
+    // playoutDelayHint is the older Chrome-only spelling, in seconds.
+    const receiver = rtpReceiverRef.current as unknown as { jitterBufferTarget?: number | null; playoutDelayHint?: number | null } | null;
+    if (!receiver || jitterTargetRef.current === ms) return;
+    jitterTargetRef.current = ms;
+    try {
+      if ('jitterBufferTarget' in receiver) {
+        receiver.jitterBufferTarget = ms;
+      } else if ('playoutDelayHint' in receiver) {
+        receiver.playoutDelayHint = ms / 1000;
+      } else {
+        return;
+      }
+      dbg(`[RTC:R] Jitter buffer target set to ${ms}ms`);
+    } catch (e) {
+      dbgWarn('[RTC:R] Could not set jitter buffer target', e);
     }
   }, []);
 
-  /** Auto-adaptive: evaluate stats and adjust quality if in auto mode */
-  const evaluateAutoQuality = useCallback((s: WebRTCStats) => {
-    if (audioQualityModeRef.current !== 'auto') return;
-
-    const current = effectiveQualityRef.current;
-    const bad = s.rtt > AUTO_DOWNGRADE_RTT ||
-                s.packetsLost > AUTO_DOWNGRADE_LOSS ||
-                s.jitter > AUTO_DOWNGRADE_JITTER;
-
-    if (bad && current === 'high') {
-      // Downgrade immediately
-      stableCountRef.current = 0;
-      applyEffectiveQuality('low');
+  const evaluateReceiverBuffer = useCallback((s: WebRTCStats) => {
+    const bad = s.lossRate > RECEIVER_BUFFER_ESCALATE_LOSS || s.jitter > RECEIVER_BUFFER_ESCALATE_JITTER;
+    if (bad) {
+      jitterCleanSecondsRef.current = 0;
+      applyJitterBufferTarget(RECEIVER_JITTER_BUFFER_LOSSY_MS);
       return;
     }
-
-    const good = s.rtt < AUTO_UPGRADE_RTT &&
-                 s.packetsLost <= AUTO_UPGRADE_LOSS &&
-                 s.jitter < AUTO_UPGRADE_JITTER;
-
-    if (good && current === 'low') {
-      // Require several consecutive good readings before upgrading
-      stableCountRef.current++;
-      if (stableCountRef.current >= AUTO_UPGRADE_STABLE_COUNT) {
-        stableCountRef.current = 0;
-        applyEffectiveQuality('high');
+    if (jitterTargetRef.current === RECEIVER_JITTER_BUFFER_LOSSY_MS) {
+      jitterCleanSecondsRef.current++;
+      if (jitterCleanSecondsRef.current >= RECEIVER_BUFFER_RELAX_SECONDS) {
+        jitterCleanSecondsRef.current = 0;
+        applyJitterBufferTarget(RECEIVER_JITTER_BUFFER_MS);
       }
-    } else if (!good) {
-      stableCountRef.current = 0;
     }
-  }, [applyEffectiveQuality]);
+  }, [applyJitterBufferTarget]);
 
   const cleanup = useCallback(() => {
     if (statsIntervalRef.current) clearInterval(statsIntervalRef.current);
@@ -300,7 +494,11 @@ export function useWebRTC(
     setConnectionState('new');
     setIceConnectionState('new');
     setSignalingState('stable');
-    stableCountRef.current = 0;
+    listenersRef.current.clear();
+    rtpReceiverRef.current = null;
+    jitterTargetRef.current = 0;
+    jitterCleanSecondsRef.current = 0;
+    setAdaptedListeners(0);
   }, []);
 
   // --- Broadcaster: create a PC for a specific receiver ---
@@ -317,6 +515,32 @@ export function useWebRTC(
 
       // Add all tracks from the broadcast stream
       stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+
+      // Negotiate Opus first (the default send codec) with audio RED behind it,
+      // so lossy listeners can be switched to redundancy later without a
+      // renegotiation. Browsers without setCodecPreferences or without RED
+      // simply keep their default codec list.
+      try {
+        const caps = RTCRtpReceiver.getCapabilities?.('audio');
+        if (caps) {
+          const opus = caps.codecs.filter((c) => c.mimeType.toLowerCase() === 'audio/opus');
+          const red = caps.codecs.filter((c) => c.mimeType.toLowerCase() === 'audio/red');
+          const rest = caps.codecs.filter((c) => !opus.includes(c) && !red.includes(c));
+          if (opus.length > 0) {
+            for (const tr of pc.getTransceivers()) {
+              if (tr.sender.track?.kind === 'audio' && typeof tr.setCodecPreferences === 'function') {
+                tr.setCodecPreferences([...opus, ...red, ...rest]);
+              }
+            }
+          }
+        }
+      } catch (e) {
+        dbgWarn('[RTC:B] Could not set codec preferences', e);
+      }
+
+      const startTier = tierForMode(audioQualityModeRef.current);
+      listenersRef.current.set(receiverId, newListenerAdapt(startTier));
+      refreshEffectiveQuality();
 
       pc.onconnectionstatechange = () => {
         dbg(`[RTC:B] connectionState → ${pc.connectionState} (receiver: ${receiverId})`);
@@ -351,11 +575,11 @@ export function useWebRTC(
         }
       };
 
-      // Create offer with Opus quality params baked in
+      // Create offer with Opus quality params baked in. The receiver echoes
+      // these back in its answer, which is what actually configures our encoder.
       try {
         const offer = await pc.createOffer();
-        const quality = effectiveQualityRef.current;
-        const mungedSdp = mungeOpusSdp(offer.sdp!, quality);
+        const mungedSdp = mungeOpusSdp(offer.sdp!, audioQualityModeRef.current === 'low' ? 'low' : 'high');
         // Build the init explicitly: spreading an RTCSessionDescription instance
         // drops its prototype getters (type becomes undefined) in some browsers
         const mungedOffer: RTCSessionDescriptionInit = { type: offer.type ?? 'offer', sdp: mungedSdp };
@@ -363,14 +587,14 @@ export function useWebRTC(
         dbg(`[RTC:B] Offer created & sent to receiver ${receiverId}`);
         signaling.send({ type: 'offer', sdp: mungedOffer, receiverId });
 
-        applyBitrateToSenders(pc, quality);
+        applyTierToSenders(pc, QUALITY_TIERS[startTier], false);
       } catch (e) {
         console.error('Failed to create offer for receiver:', receiverId, e);
       }
 
       return pc;
     },
-    [signaling, ensureIceConfig],
+    [signaling, ensureIceConfig, refreshEffectiveQuality],
   );
 
   /** Receiver: attempt auto-reconnect with exponential backoff */
@@ -475,13 +699,19 @@ export function useWebRTC(
     pc.ontrack = (event) => {
       dbg(`[RTC:R] Remote track received: ${event.track.kind} (${event.track.readyState})`);
       setRemoteStream(event.streams[0] || new MediaStream([event.track]));
+      if (event.track.kind === 'audio') {
+        rtpReceiverRef.current = event.receiver;
+        jitterTargetRef.current = 0;
+        applyJitterBufferTarget(RECEIVER_JITTER_BUFFER_MS);
+      }
     };
 
-    // Stats polling for receiver
+    // Stats polling for receiver; also drives the jitter buffer target
     statsIntervalRef.current = setInterval(async () => {
       if (pc.connectionState === 'connected') {
         const s = await parseStats(pc, 'receiver');
         setStats(s);
+        evaluateReceiverBuffer(s);
       }
     }, 1000);
 
@@ -493,7 +723,7 @@ export function useWebRTC(
     }, 5000);
 
     return pc;
-  }, [signaling]);
+  }, [signaling, applyJitterBufferTarget, evaluateReceiverBuffer]);
 
   // --- Handle signaling messages ---
   useEffect(() => {
@@ -527,6 +757,8 @@ export function useWebRTC(
               pc.close();
               pcsRef.current.delete(rid);
             }
+            listenersRef.current.delete(rid);
+            refreshEffectiveQuality();
             setPeerConnected(pcsRef.current.size > 0);
           } else {
             setPeerConnected(false);
@@ -541,14 +773,23 @@ export function useWebRTC(
             dbg(`[RTC:R] Received offer, PC exists: ${!!pc}, signalingState: ${pc?.signalingState}`);
             if (pc) {
               try {
-                await pc.setRemoteDescription(
-                  new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit),
-                );
+                const offerInit = msg.sdp as RTCSessionDescriptionInit;
+                await pc.setRemoteDescription(new RTCSessionDescription(offerInit));
                 dbg('[RTC:R] Remote description set, creating answer...');
                 const answer = await pc.createAnswer();
-                await pc.setLocalDescription(answer);
+                // Opus fmtp in an SDP describes what its author wants to
+                // *receive*, so the broadcaster's params only take effect on
+                // its encoder when they appear in our answer. Echo them.
+                const offered = extractOpusFmtp(offerInit.sdp ?? '');
+                const echo: Record<string, string> = {};
+                for (const k of ECHOED_OPUS_PARAMS) if (offered[k] !== undefined) echo[k] = offered[k];
+                const answerInit: RTCSessionDescriptionInit = {
+                  type: answer.type ?? 'answer',
+                  sdp: Object.keys(echo).length > 0 && answer.sdp ? mungeOpusSdpParams(answer.sdp, echo) : answer.sdp,
+                };
+                await pc.setLocalDescription(answerInit);
                 dbg('[RTC:R] Answer created & sent');
-                signaling.send({ type: 'answer', sdp: answer });
+                signaling.send({ type: 'answer', sdp: answerInit });
               } catch (e) {
                 console.error('Failed to handle offer:', e);
                 setStatus('error');
@@ -609,7 +850,7 @@ export function useWebRTC(
     });
 
     return unsub;
-  }, [signaling, role, createPCForReceiver]);
+  }, [signaling, role, createPCForReceiver, refreshEffectiveQuality]);
 
   const createRoom = useCallback((customId?: string, streamTitle?: string, streamDescription?: string) => {
     const msg: { type: string; [key: string]: string } = { type: 'create-room' };
@@ -637,16 +878,17 @@ export function useWebRTC(
       setStatus('on-air');
       broadcastStreamRef.current = stream;
 
-      // Stats polling for broadcaster — also drives auto quality adaptation
+      // Stats polling for broadcaster: every listener is polled and adapted
+      // on its own; the panel shows the listener having the hardest time.
       statsIntervalRef.current = setInterval(async () => {
-        for (const pc of pcsRef.current.values()) {
-          if (pc.connectionState === 'connected') {
-            const s = await parseStats(pc, 'broadcaster');
-            setStats(s);
-            evaluateAutoQuality(s);
-            break;
-          }
+        let worst: WebRTCStats | null = null;
+        for (const [rid, pc] of pcsRef.current) {
+          if (pc.connectionState !== 'connected') continue;
+          const s = await parseStats(pc, 'broadcaster');
+          evaluateAutoQuality(rid, s);
+          if (!worst || s.lossRate > worst.lossRate) worst = s;
         }
+        if (worst) setStats(worst);
       }, 1000);
 
       reportIntervalRef.current = setInterval(async () => {
@@ -699,15 +941,14 @@ export function useWebRTC(
    *  for 'auto' starts at high and adapts based on stream health. */
   const setAudioQuality = useCallback((quality: AudioQuality) => {
     audioQualityModeRef.current = quality;
-    stableCountRef.current = 0;
-
-    if (quality === 'high' || quality === 'low') {
-      applyEffectiveQuality(quality);
-    } else {
-      // Auto: start at high, let evaluateAutoQuality handle the rest
-      applyEffectiveQuality('high');
+    // Every listener restarts from the mode's tier; auto adapts from there
+    const tier = tierForMode(quality);
+    for (const rid of listenersRef.current.keys()) {
+      listenersRef.current.set(rid, newListenerAdapt(tier));
+      applyListenerTier(rid, tier);
     }
-  }, [applyEffectiveQuality]);
+    refreshEffectiveQuality();
+  }, [applyListenerTier, refreshEffectiveQuality]);
 
   useEffect(() => {
     return () => {
@@ -732,6 +973,7 @@ export function useWebRTC(
     roomId,
     setAudioQuality,
     effectiveQuality,
+    adaptedListeners,
     reconnectAttempt,
     maxReconnectAttempts: MAX_RECONNECT_ATTEMPTS,
     retryConnection,
