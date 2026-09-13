@@ -2,16 +2,54 @@ import { useCallback, useRef, useState } from 'react';
 import type { IntegrationConfig } from '@/lib/integrations';
 import { getIntegration, DEFAULT_STREAM_QUALITY } from '@/lib/integrations';
 
-// lamejs is loaded as a global UMD script or dynamic import.
-// We'll use dynamic import so it works with Vite bundling.
+// lamejs 1.2.1 is a UMD bundle whose internals reference globals (MPEGMode,
+// Lame, BitStream) that only exist when it is evaluated as a classic script.
+// `import('lamejs')` yields a namespace carrying nothing but `default`, so
+// `.Mp3Encoder` is undefined and construction throws; reaching through
+// `.default` gets further but then dies on "MPEGMode is not defined". Load the
+// UMD build from public/ instead, the same way the recorder's worker does.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let lamejs: any = null;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let lamePromise: Promise<any> | null = null;
 
-async function loadLame() {
-  if (!lamejs) {
-    lamejs = await import('lamejs');
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function loadLame(): Promise<any> {
+  if (lamejs) return Promise.resolve(lamejs);
+
+  if (!lamePromise) {
+    lamePromise = new Promise((resolve, reject) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const alreadyLoaded = (window as any).lamejs;
+      if (alreadyLoaded?.Mp3Encoder) {
+        lamejs = alreadyLoaded;
+        resolve(lamejs);
+        return;
+      }
+
+      const script = document.createElement('script');
+      script.src = '/lame.min.js';
+      script.async = true;
+      script.onload = () => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const loaded = (window as any).lamejs;
+        if (loaded?.Mp3Encoder) {
+          lamejs = loaded;
+          resolve(lamejs);
+        } else {
+          lamePromise = null;
+          reject(new Error('MP3 encoder loaded but Mp3Encoder is missing'));
+        }
+      };
+      script.onerror = () => {
+        lamePromise = null;
+        reject(new Error('Could not load the MP3 encoder (/lame.min.js)'));
+      };
+      document.head.appendChild(script);
+    });
   }
-  return lamejs;
+
+  return lamePromise;
 }
 
 export type RelayStatus = 'connected' | 'reconnecting' | 'failed' | null;
@@ -140,7 +178,10 @@ export function useIntegrationStream(): UseIntegrationStreamReturn {
         return;
       }
 
-      setRelayStatus('connected');
+      // The ack only means the server reached the external Icecast/Shoutcast
+      // host. The encoder and audio graph are built below and can still fail,
+      // so 'connected' is not reported until frames are actually flowing —
+      // otherwise a hard failure leaves a success message on screen.
 
       // After the ack, the server sends { type: 'status' } frames when the
       // external connection drops and the auto-reconnect kicks in.
@@ -256,6 +297,7 @@ export function useIntegrationStream(): UseIntegrationStreamReturn {
       };
 
       setStreaming(true);
+      setRelayStatus('connected');
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Failed to start integration stream';
       setError(msg);
