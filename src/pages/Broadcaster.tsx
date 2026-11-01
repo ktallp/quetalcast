@@ -175,6 +175,7 @@ const Broadcaster = () => {
   const [deletePresetName, setDeletePresetName] = useState<string | null>(null);
   const [qualityMode, setQualityMode] = useState<AudioQuality>('auto');
   const [endConfirmOpen, setEndConfirmOpen] = useState(false);
+  const [leaveTarget, setLeaveTarget] = useState<string | null>(null);
   const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
 
   // Pre-broadcast modal state
@@ -479,8 +480,10 @@ const Broadcaster = () => {
     if (signaling.replaced) {
       addLog('This broadcast was resumed from another window or device, so this one has been disconnected.', 'warn');
       toast.error('Broadcast resumed elsewhere; this window is disconnected');
+      // The integration has its own connection; release the mount for the new window
+      integrationStream.stopStream();
     }
-  }, [signaling.replaced]);
+  }, [signaling.replaced, integrationStream.stopStream]);
 
   // Rejoin after a socket reconnect while on air. WebRTC listeners ride out
   // the blip on their own, but the server forgets who we are: without this
@@ -817,7 +820,8 @@ const Broadcaster = () => {
   useEffect(() => {
     if (isOnAir && selectedIntegration && mixer.mixedStream && !integrationStartedRef.current) {
       integrationStartedRef.current = true;
-      integrationStream.startStream(mixer.mixedStream, selectedIntegration, webrtc.roomId).then(() => {
+      integrationStream.startStream(mixer.mixedStream, selectedIntegration, webrtc.roomId).then((started) => {
+        if (!started) return; // the failure is logged from integrationStream.error
         const integrationInfo = getIntegration(selectedIntegration.integrationId);
         addLog(`Live on ${integrationInfo?.name || 'integration'}!`);
       }).catch(() => {
@@ -826,6 +830,8 @@ const Broadcaster = () => {
       });
     }
     if (!isOnAir) {
+      // Every route off air must release the external mount, not just End Broadcast
+      if (integrationStartedRef.current) integrationStream.stopStream();
       integrationStartedRef.current = false;
     }
   }, [isOnAir, selectedIntegration, mixer.mixedStream, integrationStream, addLog]);
@@ -853,6 +859,34 @@ const Broadcaster = () => {
       addLog(`Stream relay: ${relayStream.error}`, 'warn');
     }
   }, [relayStream.error, addLog]);
+
+  // Leaving this page drops the broadcast, recording and playlist, so ask first.
+  // BrowserRouter has no useBlocker, so in-app links are caught at the document
+  // before React Router sees them. The browser's Back button is not covered.
+  const leaveGuardActive = isOnAir || recorder.recording;
+  useEffect(() => {
+    if (!leaveGuardActive) return;
+    const onClick = (e: MouseEvent) => {
+      if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      const link = (e.target as Element | null)?.closest?.('a[href]') as HTMLAnchorElement | null;
+      if (!link || (link.target && link.target !== '_self')) return;
+      const url = new URL(link.href);
+      if (url.origin !== window.location.origin || url.pathname === window.location.pathname) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setLeaveTarget(`${url.pathname}${url.search}`);
+    };
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    document.addEventListener('click', onClick, true);
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => {
+      document.removeEventListener('click', onClick, true);
+      window.removeEventListener('beforeunload', onBeforeUnload);
+    };
+  }, [leaveGuardActive]);
 
   // Surface integration relay reconnect status
   const prevRelayStatusRef = useRef<RelayStatus>(null);
@@ -1495,9 +1529,24 @@ const Broadcaster = () => {
             {isOnAir && webrtc.roomId && (
               <>
                 {selectedIntegration && integrationInfo && (
-                  <span className="flex items-center gap-1.5 text-xs font-mono text-primary bg-primary/10 px-3 py-1.5 rounded-md">
+                  <span
+                    role="status"
+                    className={`flex items-center gap-1.5 text-xs font-mono px-3 py-1.5 rounded-md ${
+                      integrationStream.error
+                        ? 'text-destructive bg-destructive/10'
+                        : integrationStream.relayStatus === 'connected'
+                          ? 'text-primary bg-primary/10'
+                          : 'text-yellow-500 bg-yellow-500/10'
+                    }`}
+                  >
                     <Radio className="h-3 w-3" aria-hidden />
-                    Streaming on {integrationInfo.name}
+                    {integrationStream.error
+                      ? `Not streaming to ${integrationInfo.name}`
+                      : integrationStream.relayStatus === 'connected'
+                        ? `Streaming on ${integrationInfo.name}`
+                        : integrationStream.relayStatus === 'reconnecting'
+                          ? `Reconnecting to ${integrationInfo.name}…`
+                          : `Connecting to ${integrationInfo.name}…`}
                   </span>
                 )}
                 <ShareLinks roomId={webrtc.roomId} />
@@ -1849,6 +1898,29 @@ const Broadcaster = () => {
         confirmLabel="End broadcast"
         destructive
         onConfirm={handleEndBroadcast}
+      />
+
+      {/* Leaving the console while live or recording */}
+      <ConfirmDialog
+        open={leaveTarget !== null}
+        onOpenChange={(open) => { if (!open) setLeaveTarget(null); }}
+        title="Leave the console?"
+        description={
+          <>
+            {isOnAir && 'Leaving ends your broadcast. '}
+            {recorder.recording && 'Your recording stops. '}
+            Open the link in a new tab to keep this console running.
+          </>
+        }
+        confirmLabel="Leave"
+        destructive
+        onConfirm={() => {
+          const target = leaveTarget;
+          setLeaveTarget(null);
+          if (isOnAir) handleEndBroadcast();
+          if (recorder.recording) recorder.stopRecording();
+          if (target) navigate(target);
+        }}
       />
 
       {/* Logout confirmation while live or recording */}

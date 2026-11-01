@@ -2289,6 +2289,11 @@ integrationWss.on('connection', (ws, req) => {
       if (shuttingDown || ws.readyState !== ws.OPEN || !connConfig) return;
       try {
         const socket = await connectToServer(connConfig.type, connConfig.credentials, logger, connConfig.streamQuality);
+        // The client may have gone while we were connecting; nothing else would close this
+        if (shuttingDown || ws.readyState !== ws.OPEN) {
+          socket.destroy();
+          return;
+        }
         attachSourceSocket(socket);
         reconnectAttempt = 0;
         sendJson({ type: 'status', state: 'connected', attempt: 0 });
@@ -2332,6 +2337,11 @@ integrationWss.on('connection', (ws, req) => {
 
         try {
           const socket = await connectToServer(type, credentials, logger, streamQuality);
+          // The client may have gone while we were connecting; nothing else would close this
+          if (shuttingDown || ws.readyState !== ws.OPEN) {
+            socket.destroy();
+            return;
+          }
           connConfig = { type, credentials, streamQuality };
           attachSourceSocket(socket);
 
