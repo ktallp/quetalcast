@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { IntegrationConfig } from '@/lib/integrations';
 import { getIntegration, DEFAULT_STREAM_QUALITY } from '@/lib/integrations';
 
@@ -59,7 +59,8 @@ export interface UseIntegrationStreamReturn {
   error: string | null;
   /** Server-side relay connection status (auto-reconnect updates) */
   relayStatus: RelayStatus;
-  startStream: (stream: MediaStream, config: IntegrationConfig, roomId?: string | null) => Promise<void>;
+  /** Resolves true once audio is flowing; false if it failed or was cancelled (see `error`) */
+  startStream: (stream: MediaStream, config: IntegrationConfig, roomId?: string | null) => Promise<boolean>;
   stopStream: () => void;
 }
 
@@ -81,8 +82,13 @@ export function useIntegrationStream(): UseIntegrationStreamReturn {
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const chunkCountRef = useRef(0);
   const flowCheckTimerRef = useRef<number | null>(null);
+  // Bumped by every start and stop, so a start still awaiting something can
+  // tell it has been superseded and socket callbacks can tell they are stale.
+  const sessionRef = useRef(0);
 
   const stopStream = useCallback(() => {
+    sessionRef.current += 1;
+
     if (flowCheckTimerRef.current !== null) {
       window.clearTimeout(flowCheckTimerRef.current);
       flowCheckTimerRef.current = null;
@@ -120,19 +126,27 @@ export function useIntegrationStream(): UseIntegrationStreamReturn {
     setRelayStatus(null);
   }, []);
 
-  const startStream = useCallback(async (stream: MediaStream, config: IntegrationConfig, roomId?: string | null) => {
+  const startStream = useCallback(async (stream: MediaStream, config: IntegrationConfig, roomId?: string | null): Promise<boolean> => {
+    // Never leave an earlier session running: it would keep the external mount
+    // and this one would be refused with "Mount point in use".
+    if (wsRef.current) stopStream();
+
     setError(null);
     setRelayStatus(null);
+
+    const session = ++sessionRef.current;
+    const isCurrent = () => sessionRef.current === session;
 
     const integration = getIntegration(config.integrationId);
     if (!integration) {
       setError('Unknown integration');
-      return;
+      return false;
     }
 
     try {
       // Load lamejs
       const lame = await loadLame();
+      if (!isCurrent()) return false;
 
       // Connect WebSocket to relay
       const wsUrl = `${WS_URL}/integration-stream`;
@@ -144,6 +158,8 @@ export function useIntegrationStream(): UseIntegrationStreamReturn {
         const timeout = setTimeout(() => reject(new Error('WebSocket connection timeout')), 10000);
         ws.onopen = () => { clearTimeout(timeout); resolve(); };
       });
+
+      if (!isCurrent()) return false;
 
       const quality = config.streamQuality || DEFAULT_STREAM_QUALITY;
 
@@ -171,11 +187,13 @@ export function useIntegrationStream(): UseIntegrationStreamReturn {
         setTimeout(() => resolve({ ok: false, error: 'Connection timeout' }), 15000);
       });
 
+      if (!isCurrent()) return false;
+
       if (!ack.ok) {
         ws.close();
         wsRef.current = null;
         setError(ack.error || 'Failed to connect to streaming server');
-        return;
+        return false;
       }
 
       // The ack only means the server reached the external Icecast/Shoutcast
@@ -206,11 +224,13 @@ export function useIntegrationStream(): UseIntegrationStreamReturn {
       const ctx = new AudioContext({ sampleRate: 44100 });
       ctxRef.current = ctx;
       await ctx.resume();
+      if (!isCurrent()) return false;
       if (ctx.state !== 'running') {
         throw new Error('Audio engine is suspended. Interact with the page and try again.');
       }
 
       await ctx.audioWorklet.addModule('/pcm-capture-processor.js');
+      if (!isCurrent()) return false;
 
       const source = ctx.createMediaStreamSource(stream);
       sourceRef.current = source;
@@ -289,21 +309,32 @@ export function useIntegrationStream(): UseIntegrationStreamReturn {
 
       // Handle WebSocket close/error
       ws.onclose = () => {
+        if (!isCurrent()) return; // our own stop, or a superseded session
+        setError('Lost connection to the streaming server');
         stopStream();
       };
       ws.onerror = () => {
+        if (!isCurrent()) return;
         setError('WebSocket error. Stream disconnected.');
         stopStream();
       };
 
       setStreaming(true);
       setRelayStatus('connected');
+      return true;
     } catch (e) {
+      if (!isCurrent()) return false;
       const msg = e instanceof Error ? e.message : 'Failed to start integration stream';
       setError(msg);
       stopStream();
+      return false;
     }
   }, [stopStream]);
+
+  // Leaving the console in the same tab unmounts this hook while the page lives
+  // on. Without this the session keeps streaming silence and holds the external
+  // mount, with nothing left on screen able to stop it.
+  useEffect(() => stopStream, [stopStream]);
 
   return { streaming, error, relayStatus, startStream, stopStream };
 }
